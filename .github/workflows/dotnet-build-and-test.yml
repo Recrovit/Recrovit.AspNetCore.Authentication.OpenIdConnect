@@ -1,0 +1,32 @@
+name: .NET Build and Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore Recrovit.AspNetCore.Authentication.OpenIdConnect.slnx -p:RestoreForce=true
+
+      - name: Build
+        run: dotnet build Recrovit.AspNetCore.Authentication.OpenIdConnect.slnx --configuration Release --no-restore
+
+      - name: Run tests
+        run: dotnet test --project tests/Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.csproj --configuration Release --no-build --no-restore

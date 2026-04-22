@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path=".github/workflows/dotnet-build-and-test.yml" />
+    <File Path=".gitignore" />
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Build.targets" />
+    <File Path="global.json" />
+    <File Path="README.md" />
+  </Folder>
+  <Project Path="src/Recrovit.AspNetCore.Authentication.OpenIdConnect.csproj" />
+  <Project Path="tests/Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.csproj" />
+</Solution>

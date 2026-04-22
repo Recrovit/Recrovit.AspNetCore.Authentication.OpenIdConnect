@@ -1,0 +1,12 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.0.7" />
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.17.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('$(RepositoryRoot)README.md')">
+    <None Include="$(RepositoryRoot)README.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+</Project>
