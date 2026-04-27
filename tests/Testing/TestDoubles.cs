@@ -15,6 +15,8 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 using System.Net;
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Encodings.Web;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
@@ -552,6 +554,48 @@ internal sealed class FakeHostEnvironment : IHostEnvironment
     public string ContentRootPath { get; set; } = string.Empty;
 
     public IFileProvider ContentRootFileProvider { get; set; } = null!;
+}
+
+internal sealed class TemporaryPfxCertificate : IDisposable
+{
+    public TemporaryPfxCertificate(string path, string? password, X509Certificate2 certificate)
+    {
+        Path = path;
+        Password = password;
+        Certificate = certificate;
+    }
+
+    public string Path { get; }
+
+    public string? Password { get; }
+
+    public X509Certificate2 Certificate { get; }
+
+    public void Dispose()
+    {
+        Certificate.Dispose();
+        if (File.Exists(Path))
+        {
+            File.Delete(Path);
+        }
+    }
+}
+
+internal static class TestCertificates
+{
+    public static TemporaryPfxCertificate CreateTemporaryPfx(string? password = "test-password")
+    {
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=Recrovit.Test.Client",
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+        var tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"recrovit-oidc-{Guid.NewGuid():n}.pfx");
+        File.WriteAllBytes(tempPath, certificate.Export(X509ContentType.Pkcs12, password));
+        return new TemporaryPfxCertificate(tempPath, password, certificate);
+    }
 }
 
 internal sealed class StubDistributedCache : IDistributedCache

@@ -126,7 +126,7 @@ Bound to `OidcProviderOptions`.
 Key responsibilities:
 
 - identity provider authority
-- OIDC client credentials
+- OIDC client credentials and certificate-based client authentication
 - callback and sign-out paths
 - extra login and identity scopes
 - UserInfo loading behavior
@@ -245,6 +245,7 @@ In development or simple single-instance local runs, you can usually omit it. In
         "MainProvider": {
           "Authority": "https://idp.example.com",
           "ClientId": "client-id",
+          "ClientAuthenticationMethod": "ClientSecretPost",
           "ClientSecret": "client-secret",
           "Scopes": [ "openid", "profile", "offline_access" ],
           "CallbackPath": "/signin-oidc",
@@ -274,6 +275,71 @@ In development or simple single-instance local runs, you can usually omit it. In
   }
 }
 ```
+
+## Certificate-Based Client Authentication
+
+The package also supports certificate-based token endpoint authentication by using `private_key_jwt`.
+
+Set `ClientAuthenticationMethod` to `PrivateKeyJwt`, remove `ClientSecret`, and configure `ClientCertificate`.
+
+### PFX File Example
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Provider": "MainProvider",
+      "Providers": {
+        "MainProvider": {
+          "Authority": "https://idp.example.com",
+          "ClientId": "client-id",
+          "ClientAuthenticationMethod": "PrivateKeyJwt",
+          "ClientCertificate": {
+            "Source": "File",
+            "File": {
+              "Path": "/secrets/oidc-client.pfx",
+              "Password": "pfx-password"
+            }
+          },
+          "Scopes": [ "openid", "profile", "offline_access" ]
+        }
+      }
+    }
+  }
+}
+```
+
+### Windows Certificate Store Example
+
+Windows hosts can also load the certificate from the Windows Certificate Store.
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Provider": "MainProvider",
+      "Providers": {
+        "MainProvider": {
+          "Authority": "https://idp.example.com",
+          "ClientId": "client-id",
+          "ClientAuthenticationMethod": "PrivateKeyJwt",
+          "ClientCertificate": {
+            "Source": "WindowsStore",
+            "Store": {
+              "Thumbprint": "ABCD1234EF567890ABCD1234EF567890ABCD1234",
+              "StoreName": "My",
+              "StoreLocation": "LocalMachine"
+            }
+          },
+          "Scopes": [ "openid", "profile", "offline_access" ]
+        }
+      }
+    }
+  }
+}
+```
+
+The certificate is loaded lazily and cached in memory for the lifetime of the application process. After configuration changes, restart the application so the package can reload the new certificate.
 
 When an external identity provider redirects back to the configured callback path with a handled user-facing failure such as `access_denied`, `login_required`, or a canceled sign-in flow, the package redirects the browser to `Recrovit:OpenIdConnect:Host:RemoteFailureRedirectPath` instead of leaving the user on the raw `/signin-oidc` callback failure.
 

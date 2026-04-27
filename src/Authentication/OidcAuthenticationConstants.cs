@@ -60,6 +60,11 @@ public static class OidcAuthenticationConstants
         /// The JWT claim name that stores delegated scopes in short form.
         /// </summary>
         public const string Scp = "scp";
+
+        /// <summary>
+        /// The form field name that stores the OAuth client assertion type.
+        /// </summary>
+        public const string ClientAssertionType = "client_assertion_type";
     }
 
     /// <summary>
@@ -114,5 +119,16 @@ public static class OidcAuthenticationConstants
         /// The OAuth error code returned when the refresh grant is no longer valid.
         /// </summary>
         public const string InvalidGrant = "invalid_grant";
+    }
+
+    /// <summary>
+    /// Provides OAuth client assertion constants.
+    /// </summary>
+    public static class ClientAssertions
+    {
+        /// <summary>
+        /// The JWT bearer assertion type identifier used for private_key_jwt.
+        /// </summary>
+        public const string JwtBearerType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
     }
 }

@@ -20,6 +20,7 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Diagnostics;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 
@@ -61,6 +62,29 @@ public static class OidcAuthenticationServiceCollectionExtensions
             .Validate(
                 options => options.Scopes.All(scope => !string.IsNullOrWhiteSpace(scope)),
                 $"{providerSection.Path}:Scopes must not contain empty values.")
+            .Validate(
+                options => options.ClientAuthenticationMethod != OidcClientAuthenticationMethod.ClientSecretPost
+                    || !string.IsNullOrWhiteSpace(options.ClientSecret),
+                $"{providerSection.Path}:ClientSecret is required when ClientAuthenticationMethod is ClientSecretPost.")
+            .Validate(
+                options => options.ClientAuthenticationMethod != OidcClientAuthenticationMethod.PrivateKeyJwt
+                    || options.ClientCertificate is not null,
+                $"{providerSection.Path}:ClientCertificate is required when ClientAuthenticationMethod is PrivateKeyJwt.")
+            .Validate(
+                options => options.ClientAuthenticationMethod != OidcClientAuthenticationMethod.PrivateKeyJwt
+                    || options.ClientCertificate!.Source != OidcClientCertificateSource.File
+                    || !string.IsNullOrWhiteSpace(options.ClientCertificate.File?.Path),
+                $"{providerSection.Path}:ClientCertificate:File:Path is required when ClientCertificate:Source is File.")
+            .Validate(
+                options => options.ClientAuthenticationMethod != OidcClientAuthenticationMethod.PrivateKeyJwt
+                    || options.ClientCertificate!.Source != OidcClientCertificateSource.WindowsStore
+                    || !string.IsNullOrWhiteSpace(options.ClientCertificate.Store?.Thumbprint),
+                $"{providerSection.Path}:ClientCertificate:Store:Thumbprint is required when ClientCertificate:Source is WindowsStore.")
+            .Validate(
+                options => options.ClientAuthenticationMethod != OidcClientAuthenticationMethod.PrivateKeyJwt
+                    || options.ClientCertificate!.Source != OidcClientCertificateSource.WindowsStore
+                    || OperatingSystem.IsWindows(),
+                $"{providerSection.Path}:ClientCertificate:Source 'WindowsStore' is only supported on Windows.")
             .ValidateOnStart();
 
         services.AddOptions<TokenCacheOptions>()
@@ -109,6 +133,9 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddSingleton(downstreamApiCatalog);
         services.AddSingleton(scopeResolver);
         services.AddSingleton<IUserRefreshLockProvider, UserRefreshLockProvider>();
+        services.AddSingleton<ICertificateStoreReader, WindowsCertificateStoreReader>();
+        services.AddSingleton<IOidcClientCertificateLoader, OidcClientCertificateLoader>();
+        services.AddSingleton<IOidcClientAssertionService, OidcPrivateKeyJwtClientAssertionService>();
 
         services.AddDistributedMemoryCache();
         services.AddHttpContextAccessor();
@@ -129,7 +156,8 @@ public static class OidcAuthenticationServiceCollectionExtensions
             serviceProvider.GetRequiredService<ILogger<OidcDownstreamUserTokenProvider>>(),
             serviceProvider.GetRequiredService<IHttpClientFactory>(),
             serviceProvider.GetRequiredService<IWebHostEnvironment>(),
-            serviceProvider.GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>()));
+            serviceProvider.GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>(),
+            serviceProvider.GetRequiredService<IOidcClientAssertionService>()));
         services.AddScoped<OidcSessionCleanupService>();
 
         services.AddAuthentication(options =>
@@ -189,7 +217,9 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
                 options.Authority = oidcOptions.Authority;
                 options.ClientId = oidcOptions.ClientId;
-                options.ClientSecret = oidcOptions.ClientSecret;
+                options.ClientSecret = oidcOptions.ClientAuthenticationMethod == OidcClientAuthenticationMethod.ClientSecretPost
+                    ? oidcOptions.ClientSecret
+                    : null;
                 options.CallbackPath = oidcOptions.CallbackPath;
                 options.SignedOutCallbackPath = oidcOptions.SignedOutCallbackPath;
                 options.RemoteSignOutPath = oidcOptions.RemoteSignOutPath;
@@ -218,6 +248,24 @@ public static class OidcAuthenticationServiceCollectionExtensions
                             context.ProtocolMessage.SetParameter(AuthenticationEndpoints.DomainHintParameterName, domainHint);
                         }
 
+                        return Task.CompletedTask;
+                    },
+                    OnAuthorizationCodeReceived = context =>
+                    {
+                        var providerOptions = context.HttpContext.RequestServices
+                            .GetRequiredService<IOptions<OidcProviderOptions>>()
+                            .Value;
+                        if (providerOptions.ClientAuthenticationMethod != OidcClientAuthenticationMethod.PrivateKeyJwt)
+                        {
+                            return Task.CompletedTask;
+                        }
+
+                        var assertionService = context.HttpContext.RequestServices.GetRequiredService<IOidcClientAssertionService>();
+                        context.TokenEndpointRequest ??= new OpenIdConnectMessage();
+                        context.TokenEndpointRequest.ClientSecret = null;
+                        context.TokenEndpointRequest.Parameters.Remove(OpenIdConnectParameterNames.ClientSecret);
+                        context.TokenEndpointRequest.ClientAssertionType = OidcAuthenticationConstants.ClientAssertions.JwtBearerType;
+                        context.TokenEndpointRequest.ClientAssertion = assertionService.CreateClientAssertion(context.TokenEndpointRequest.IssuerAddress);
                         return Task.CompletedTask;
                     },
                     OnRemoteFailure = context =>

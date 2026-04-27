@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
@@ -85,6 +86,60 @@ public sealed class OidcDownstreamUserTokenProviderTests
         _ = await provider.GetAccessTokenAsync(user, "GraphApi", CancellationToken.None);
 
         Assert.Contains("scope=graph.read", handler.LastRequestContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetAccessTokenAsync_UsesClientAssertion_WhenConfiguredForPrivateKeyJwt()
+    {
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var handler = new CaptureRequestHandler();
+        var provider = CreateProvider(
+            new InMemoryTokenStore(new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            }),
+            new DelegatingHttpClientFactory(handler),
+            configurationOverrides: CreatePrivateKeyJwtOverrides(certificate));
+
+        _ = await provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None);
+
+        Assert.NotNull(handler.LastRequestContent);
+        Assert.Contains("client_assertion_type=", handler.LastRequestContent, StringComparison.Ordinal);
+        Assert.Contains("client_assertion=", handler.LastRequestContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("client_secret=", handler.LastRequestContent, StringComparison.Ordinal);
+
+        var formValues = ParseFormBody(handler.LastRequestContent);
+        var token = new JsonWebToken(formValues[OpenIdConnectParameterNames.ClientAssertion]);
+        Assert.Equal("client-id", token.Issuer);
+        Assert.Equal("client-id", token.Subject);
+        Assert.Contains("https://idp.example.com/connect/token", token.Audiences);
+    }
+
+    [Fact]
+    public async Task GetAccessTokenAsync_ReusesCachedCertificate_ForPrivateKeyJwtAfterCertificateFileIsDeleted()
+    {
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var handler = new CaptureRequestHandler("""{"access_token":"captured-token","expires_in":0}""");
+        var user = TestUsers.CreateAuthenticatedUser(sessionId: "session-a");
+        var provider = CreateProvider(
+            new InMemoryTokenStore(user, new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            }),
+            new DelegatingHttpClientFactory(handler),
+            configurationOverrides: CreatePrivateKeyJwtOverrides(certificate));
+
+        _ = await provider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None);
+
+        File.Delete(certificate.Path);
+
+        var token = await provider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None);
+
+        Assert.Equal("captured-token", token);
+        Assert.NotNull(handler.LastRequestContent);
+        Assert.Contains("client_assertion=", handler.LastRequestContent, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -439,18 +494,28 @@ public sealed class OidcDownstreamUserTokenProviderTests
         IHttpClientFactory httpClientFactory,
         FakeWebHostEnvironment? environment = null,
         ListLoggerFactory? loggerFactory = null,
-        IOptionsMonitor<OpenIdConnectOptions>? openIdOptionsMonitor = null)
+        IOptionsMonitor<OpenIdConnectOptions>? openIdOptionsMonitor = null,
+        Dictionary<string, string?>? configurationOverrides = null)
     {
         var services = new ServiceCollection();
         environment ??= new FakeWebHostEnvironment { EnvironmentName = Environments.Development };
         services.AddLogging();
-        services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(new Dictionary<string, string?>
+        var overrides = new Dictionary<string, string?>
         {
             [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = "https://api.example.com",
             [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid",
             [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:BaseUrl"] = "https://graph.example.com",
             [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read"
-        }), environment);
+        };
+        if (configurationOverrides is not null)
+        {
+            foreach (var (key, value) in configurationOverrides)
+            {
+                overrides[key] = value;
+            }
+        }
+
+        services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(overrides), environment);
         services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
         services.Replace(ServiceDescriptor.Singleton(httpClientFactory));
         services.Replace(ServiceDescriptor.Singleton<IOptionsMonitor<OpenIdConnectOptions>>(openIdOptionsMonitor ?? new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
@@ -501,5 +566,32 @@ public sealed class OidcDownstreamUserTokenProviderTests
             .TrimEnd('=')
             .Replace('+', '-')
             .Replace('/', '_');
+    }
+
+    private static Dictionary<string, string?> CreatePrivateKeyJwtOverrides(TemporaryPfxCertificate certificate)
+    {
+        return new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientAuthenticationMethod"] = "PrivateKeyJwt",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientSecret"] = null,
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:Source"] = "File",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:File:Path"] = certificate.Path,
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:File:Password"] = certificate.Password
+        };
+    }
+
+    private static Dictionary<string, string> ParseFormBody(string? body)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(body));
+
+        return body!
+            .Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(part => part.Split('=', 2))
+            .ToDictionary(
+                parts => Uri.UnescapeDataString(parts[0].Replace("+", "%20", StringComparison.Ordinal)),
+                parts => parts.Length > 1
+                    ? Uri.UnescapeDataString(parts[1].Replace("+", "%20", StringComparison.Ordinal))
+                    : string.Empty,
+                StringComparer.Ordinal);
     }
 }
