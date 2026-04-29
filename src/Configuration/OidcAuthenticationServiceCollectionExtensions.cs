@@ -250,14 +250,14 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
                         return Task.CompletedTask;
                     },
-                    OnAuthorizationCodeReceived = context =>
+                    OnAuthorizationCodeReceived = async context =>
                     {
                         var providerOptions = context.HttpContext.RequestServices
                             .GetRequiredService<IOptions<OidcProviderOptions>>()
                             .Value;
                         if (providerOptions.ClientAuthenticationMethod != OidcClientAuthenticationMethod.PrivateKeyJwt)
                         {
-                            return Task.CompletedTask;
+                            return;
                         }
 
                         var assertionService = context.HttpContext.RequestServices.GetRequiredService<IOidcClientAssertionService>();
@@ -265,8 +265,10 @@ public static class OidcAuthenticationServiceCollectionExtensions
                         context.TokenEndpointRequest.ClientSecret = null;
                         context.TokenEndpointRequest.Parameters.Remove(OpenIdConnectParameterNames.ClientSecret);
                         context.TokenEndpointRequest.ClientAssertionType = OidcAuthenticationConstants.ClientAssertions.JwtBearerType;
-                        context.TokenEndpointRequest.ClientAssertion = assertionService.CreateClientAssertion(context.TokenEndpointRequest.IssuerAddress);
-                        return Task.CompletedTask;
+                        var tokenEndpoint = await ResolveTokenEndpointForAuthorizationCodeRedemptionAsync(
+                            context,
+                            context.HttpContext.RequestAborted);
+                        context.TokenEndpointRequest.ClientAssertion = assertionService.CreateClientAssertion(tokenEndpoint);
                     },
                     OnRemoteFailure = context =>
                     {
@@ -358,6 +360,28 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddSingleton<IStartupFilter>(_ => new ConfigurationStartupFilter(environment));
 
         return services;
+    }
+
+    private static async Task<string> ResolveTokenEndpointForAuthorizationCodeRedemptionAsync(
+        AuthorizationCodeReceivedContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        var tokenEndpoint = context.TokenEndpointRequest?.IssuerAddress;
+        if (!string.IsNullOrWhiteSpace(tokenEndpoint))
+        {
+            return tokenEndpoint;
+        }
+
+        var configuration = await context.Options.ConfigurationManager!.GetConfigurationAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(configuration.TokenEndpoint))
+        {
+            return configuration.TokenEndpoint;
+        }
+
+        throw new InvalidOperationException(
+            "The token endpoint is not available from the authorization code redemption request or the OIDC metadata.");
     }
 
     private static bool IsValidPath(string? path)
