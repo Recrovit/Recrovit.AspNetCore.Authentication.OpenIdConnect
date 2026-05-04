@@ -374,14 +374,23 @@ public static class OidcAuthenticationServiceCollectionExtensions
             return tokenEndpoint;
         }
 
-        var configuration = await context.Options.ConfigurationManager!.GetConfigurationAsync(cancellationToken);
-        if (!string.IsNullOrWhiteSpace(configuration.TokenEndpoint))
+        tokenEndpoint = context.Options.Configuration?.TokenEndpoint;
+        if (!string.IsNullOrWhiteSpace(tokenEndpoint))
         {
-            return configuration.TokenEndpoint;
+            return tokenEndpoint;
+        }
+
+        if (context.Options.ConfigurationManager is not null)
+        {
+            var configuration = await context.Options.ConfigurationManager.GetConfigurationAsync(cancellationToken);
+            if (!string.IsNullOrWhiteSpace(configuration.TokenEndpoint))
+            {
+                return configuration.TokenEndpoint;
+            }
         }
 
         throw new InvalidOperationException(
-            "The token endpoint is not available from the authorization code redemption request or the OIDC metadata.");
+            "The token endpoint is not available from the authorization code redemption request, the static OIDC configuration, or the OIDC metadata.");
     }
 
     private static bool IsValidPath(string? path)

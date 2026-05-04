@@ -541,6 +541,110 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public async Task AddOidcAuthenticationInfrastructure_UsesStaticConfigurationTokenEndpointFallbackForAuthorizationCodeRedemption_WhenIssuerAddressMissing()
+    {
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientAuthenticationMethod"] = "PrivateKeyJwt",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientSecret"] = null,
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:Source"] = "File",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:File:Path"] = certificate.Path,
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:File:Password"] = certificate.Password
+        });
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var oidcOptions = serviceProvider.GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>()
+            .Get(OpenIdConnectDefaults.AuthenticationScheme);
+        oidcOptions.Configuration = new OpenIdConnectConfiguration
+        {
+            TokenEndpoint = "https://idp.example.com/connect/token"
+        };
+        oidcOptions.ConfigurationManager = null;
+
+        var httpContext = new DefaultHttpContext
+        {
+            RequestServices = serviceProvider
+        };
+        var context = new AuthorizationCodeReceivedContext(
+            httpContext,
+            new AuthenticationScheme(OpenIdConnectDefaults.AuthenticationScheme, null, typeof(PassThroughAuthenticationHandler)),
+            oidcOptions,
+            new AuthenticationProperties())
+        {
+            TokenEndpointRequest = new Microsoft.IdentityModel.Protocols.OpenIdConnect.OpenIdConnectMessage
+            {
+                ClientId = "client-id",
+                ClientSecret = "client-secret"
+            }
+        };
+
+        await oidcOptions.Events.AuthorizationCodeReceived(context);
+
+        Assert.Null(context.TokenEndpointRequest.ClientSecret);
+        Assert.False(context.TokenEndpointRequest.Parameters.ContainsKey(OpenIdConnectParameterNames.ClientSecret));
+        Assert.Equal(OidcAuthenticationConstants.ClientAssertions.JwtBearerType, context.TokenEndpointRequest.ClientAssertionType);
+        Assert.False(string.IsNullOrWhiteSpace(context.TokenEndpointRequest.ClientAssertion));
+
+        var token = new JsonWebToken(context.TokenEndpointRequest.ClientAssertion);
+        Assert.Equal("client-id", token.Issuer);
+        Assert.Equal("client-id", token.Subject);
+        Assert.Contains("https://idp.example.com/connect/token", token.Audiences);
+    }
+
+    [Fact]
+    public async Task AddOidcAuthenticationInfrastructure_ThrowsClearExceptionForAuthorizationCodeRedemption_WhenNoTokenEndpointCanBeResolved()
+    {
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientAuthenticationMethod"] = "PrivateKeyJwt",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientSecret"] = null,
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:Source"] = "File",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:File:Path"] = certificate.Path,
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:File:Password"] = certificate.Password
+        });
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var oidcOptions = serviceProvider.GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>()
+            .Get(OpenIdConnectDefaults.AuthenticationScheme);
+        oidcOptions.Configuration = null;
+        oidcOptions.ConfigurationManager = null;
+
+        var httpContext = new DefaultHttpContext
+        {
+            RequestServices = serviceProvider
+        };
+        var context = new AuthorizationCodeReceivedContext(
+            httpContext,
+            new AuthenticationScheme(OpenIdConnectDefaults.AuthenticationScheme, null, typeof(PassThroughAuthenticationHandler)),
+            oidcOptions,
+            new AuthenticationProperties())
+        {
+            TokenEndpointRequest = new Microsoft.IdentityModel.Protocols.OpenIdConnect.OpenIdConnectMessage
+            {
+                ClientId = "client-id",
+                ClientSecret = "client-secret"
+            }
+        };
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            oidcOptions.Events.AuthorizationCodeReceived(context));
+
+        Assert.Equal(
+            "The token endpoint is not available from the authorization code redemption request, the static OIDC configuration, or the OIDC metadata.",
+            ex.Message);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_RegistersActiveProviderOptions()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
