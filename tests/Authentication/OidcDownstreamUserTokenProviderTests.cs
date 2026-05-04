@@ -89,6 +89,68 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     [Fact]
+    public async Task GetAccessTokenAsync_PublicConstructorWithoutAssertionService_RefreshesForClientSecretPost()
+    {
+        var user = TestUsers.CreateAuthenticatedUser();
+        var tokenStore = new InMemoryTokenStore(new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+        });
+        var handler = new CaptureRequestHandler();
+        var provider = CreateDirectProvider(tokenStore, new DelegatingHttpClientFactory(handler));
+
+        var token = await provider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None);
+
+        Assert.Equal("captured-token", token);
+        Assert.NotNull(handler.LastRequestContent);
+        Assert.Contains("client_secret=client-secret", handler.LastRequestContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetAccessTokenAsync_PublicConstructorWithAssertionService_UsesClientAssertion_WhenConfiguredForPrivateKeyJwt()
+    {
+        var user = TestUsers.CreateAuthenticatedUser();
+        var tokenStore = new InMemoryTokenStore(new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+        });
+        var handler = new CaptureRequestHandler();
+        var provider = CreateDirectProvider(
+            tokenStore,
+            new DelegatingHttpClientFactory(handler),
+            oidcOptions: CreateProviderOptions(OidcClientAuthenticationMethod.PrivateKeyJwt),
+            clientAssertionService: new FixedClientAssertionService("direct-client-assertion"));
+
+        var token = await provider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None);
+
+        Assert.Equal("captured-token", token);
+        Assert.NotNull(handler.LastRequestContent);
+        Assert.Contains("client_assertion=direct-client-assertion", handler.LastRequestContent, StringComparison.Ordinal);
+        Assert.Contains("client_assertion_type=", handler.LastRequestContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("client_secret=", handler.LastRequestContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetAccessTokenAsync_PublicConstructorWithoutAssertionService_ThrowsClearError_WhenConfiguredForPrivateKeyJwt()
+    {
+        var provider = CreateDirectProvider(
+            new InMemoryTokenStore(new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            }),
+            new StubHttpClientFactory("{}"),
+            oidcOptions: CreateProviderOptions(OidcClientAuthenticationMethod.PrivateKeyJwt));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None));
+
+        Assert.Equal("PrivateKeyJwt authentication requires the OIDC client assertion service.", ex.Message);
+    }
+
+    [Fact]
     public async Task GetAccessTokenAsync_UsesClientAssertion_WhenConfiguredForPrivateKeyJwt()
     {
         using var certificate = TestCertificates.CreateTemporaryPfx();
@@ -530,6 +592,46 @@ public sealed class OidcDownstreamUserTokenProviderTests
 
         var serviceProvider = services.BuildServiceProvider();
         return serviceProvider.GetRequiredService<IDownstreamUserTokenProvider>();
+    }
+
+    private static OidcDownstreamUserTokenProvider CreateDirectProvider(
+        InMemoryTokenStore tokenStore,
+        IHttpClientFactory httpClientFactory,
+        OidcProviderOptions? oidcOptions = null,
+        IOidcClientAssertionService? clientAssertionService = null,
+        IOptionsMonitor<OpenIdConnectOptions>? openIdOptionsMonitor = null)
+    {
+        oidcOptions ??= CreateProviderOptions();
+
+        return new OidcDownstreamUserTokenProvider(
+            tokenStore,
+            TestFactories.CreateDownstreamApiCatalog(),
+            Options.Create(oidcOptions),
+            Options.Create(new ActiveOidcProviderOptions { ProviderName = "Duende" }),
+            Options.Create(TestFactories.CreateTokenCacheOptions()),
+            new LoggerFactory().CreateLogger<OidcDownstreamUserTokenProvider>(),
+            httpClientFactory,
+            new FakeHostEnvironment { EnvironmentName = Environments.Development },
+            openIdOptionsMonitor ?? new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
+            {
+                ConfigurationManager = new StaticConfigurationManager("https://idp.example.com/connect/token")
+            }),
+            clientAssertionService);
+    }
+
+    private static OidcProviderOptions CreateProviderOptions(
+        OidcClientAuthenticationMethod clientAuthenticationMethod = OidcClientAuthenticationMethod.ClientSecretPost)
+    {
+        return new OidcProviderOptions
+        {
+            Authority = "https://idp.example.com",
+            ClientId = "client-id",
+            ClientSecret = clientAuthenticationMethod == OidcClientAuthenticationMethod.ClientSecretPost
+                ? "client-secret"
+                : null,
+            ClientAuthenticationMethod = clientAuthenticationMethod,
+            Scopes = ["openid", "profile"]
+        };
     }
 
     private static string CreateJwtAccessToken((string Name, string Value) claim)

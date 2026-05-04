@@ -281,6 +281,7 @@ In development or simple single-instance local runs, you can usually omit it. In
 The package also supports certificate-based token endpoint authentication by using `private_key_jwt`.
 
 Set `ClientAuthenticationMethod` to `PrivateKeyJwt`, remove `ClientSecret`, and configure `ClientCertificate`.
+If you instantiate `OidcDownstreamUserTokenProvider` directly instead of resolving it from DI, use the constructor overload that accepts `IOidcClientAssertionService`; `PrivateKeyJwt` refresh token exchange requires that service.
 
 ### PFX File Example
 

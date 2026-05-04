@@ -489,6 +489,48 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public async Task AddOidcAuthenticationInfrastructure_UsesInjectedClientAssertionService_ForDownstreamRefreshProvider()
+    {
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientAuthenticationMethod"] = "PrivateKeyJwt",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientSecret"] = null,
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:Source"] = "File",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:File:Path"] = certificate.Path,
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:ClientCertificate:File:Password"] = certificate.Password,
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = "https://api.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid"
+        });
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+        services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => new InMemoryTokenStore(new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+        })));
+        var handler = new CaptureRequestHandler();
+        services.Replace(ServiceDescriptor.Singleton<IHttpClientFactory>(new DelegatingHttpClientFactory(handler)));
+        services.Replace(ServiceDescriptor.Singleton<IOptionsMonitor<OpenIdConnectOptions>>(new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
+        {
+            ConfigurationManager = new StaticConfigurationManager("https://idp.example.com/connect/token")
+        })));
+        services.Replace(ServiceDescriptor.Singleton<IOidcClientAssertionService>(new FixedClientAssertionService("di-client-assertion")));
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var provider = serviceProvider.GetRequiredService<IDownstreamUserTokenProvider>();
+
+        var token = await provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None);
+
+        Assert.Equal("captured-token", token);
+        Assert.NotNull(handler.LastRequestContent);
+        Assert.Contains("client_assertion=di-client-assertion", handler.LastRequestContent, StringComparison.Ordinal);
+        Assert.DoesNotContain("client_secret=", handler.LastRequestContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AddOidcAuthenticationInfrastructure_UsesMetadataTokenEndpointFallbackForAuthorizationCodeRedemption_WhenIssuerAddressMissing()
     {
         using var certificate = TestCertificates.CreateTemporaryPfx();

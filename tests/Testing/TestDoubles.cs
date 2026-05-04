@@ -160,6 +160,14 @@ internal sealed class StubDownstreamUserTokenProvider : IDownstreamUserTokenProv
     }
 }
 
+internal sealed class FixedClientAssertionService(string assertion) : IOidcClientAssertionService
+{
+    public string CreateClientAssertion(string tokenEndpoint)
+    {
+        return assertion;
+    }
+}
+
 internal sealed class ThrowingDownstreamUserTokenProvider(Exception exception) : IDownstreamUserTokenProvider
 {
     public Task<string> GetAccessTokenAsync(ClaimsPrincipal user, string downstreamApiName, CancellationToken cancellationToken)

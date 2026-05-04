@@ -32,6 +32,15 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
     private readonly IHostEnvironment hostEnvironment;
     private readonly IOidcClientAssertionService? clientAssertionService;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="OidcDownstreamUserTokenProvider"/> class.
+    /// </summary>
+    /// <remarks>
+    /// This overload supports <see cref="OidcClientAuthenticationMethod.ClientSecretPost"/>.
+    /// When <see cref="OidcClientAuthenticationMethod.PrivateKeyJwt"/> is configured, use the overload
+    /// that accepts an <see cref="IOidcClientAssertionService"/> so the refresh token exchange can create
+    /// a client assertion.
+    /// </remarks>
     public OidcDownstreamUserTokenProvider(
         IDownstreamUserTokenStore tokenStore,
         DownstreamApiCatalog downstreamApiCatalog,
@@ -55,6 +64,42 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             hostEnvironment,
             openIdConnectOptionsMonitor,
             clientAssertionService: null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="OidcDownstreamUserTokenProvider"/> class.
+    /// </summary>
+    /// <remarks>
+    /// Provide <paramref name="clientAssertionService"/> when
+    /// <see cref="OidcProviderOptions.ClientAuthenticationMethod"/> is
+    /// <see cref="OidcClientAuthenticationMethod.PrivateKeyJwt"/>. For
+    /// <see cref="OidcClientAuthenticationMethod.ClientSecretPost"/>, this parameter is optional.
+    /// </remarks>
+    public OidcDownstreamUserTokenProvider(
+        IDownstreamUserTokenStore tokenStore,
+        DownstreamApiCatalog downstreamApiCatalog,
+        IOptions<OidcProviderOptions> oidcOptions,
+        IOptions<ActiveOidcProviderOptions> activeProviderOptions,
+        IOptions<TokenCacheOptions> tokenCacheOptions,
+        ILogger<OidcDownstreamUserTokenProvider> logger,
+        IHttpClientFactory httpClientFactory,
+        IHostEnvironment hostEnvironment,
+        IOptionsMonitor<OpenIdConnectOptions> openIdConnectOptionsMonitor,
+        IOidcClientAssertionService? clientAssertionService)
+        : this(
+            tokenStore,
+            new UserRefreshLockProvider(activeProviderOptions),
+            downstreamApiCatalog,
+            new OidcScopeResolver(oidcOptions.Value.Scopes, downstreamApiCatalog),
+            oidcOptions,
+            activeProviderOptions,
+            tokenCacheOptions,
+            logger,
+            httpClientFactory,
+            hostEnvironment,
+            openIdConnectOptionsMonitor,
+            clientAssertionService)
     {
     }
 
