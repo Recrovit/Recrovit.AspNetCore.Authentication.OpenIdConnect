@@ -506,6 +506,56 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     [Fact]
+    public async Task GetAccessTokenAsync_RefreshesExpiredToken_WhenStaticConfigurationProvidesTokenEndpoint()
+    {
+        var provider = CreateProvider(
+            new InMemoryTokenStore(new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            }),
+            new StubHttpClientFactory(CreateTokenResponse(
+                accessToken: "fresh-token",
+                refreshToken: "fresh-refresh")),
+            openIdOptionsMonitor: new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
+            {
+                Configuration = new OpenIdConnectConfiguration
+                {
+                    TokenEndpoint = "https://idp.example.com/connect/token"
+                },
+                ConfigurationManager = null
+            }));
+
+        var token = await provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None);
+
+        Assert.Equal("fresh-token", token);
+    }
+
+    [Fact]
+    public async Task GetAccessTokenAsync_ThrowsTokenRefreshFailed_WhenNoTokenEndpointCanBeResolved()
+    {
+        var provider = CreateProvider(
+            new InMemoryTokenStore(new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            }),
+            new StubHttpClientFactory("{}"),
+            openIdOptionsMonitor: new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
+            {
+                Configuration = new OpenIdConnectConfiguration(),
+                ConfigurationManager = null
+            }));
+
+        var ex = await Assert.ThrowsAsync<OidcTokenRefreshFailedException>(() =>
+            provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None));
+
+        Assert.Equal(
+            "The OIDC token endpoint is not available from the static configuration or the OIDC metadata.",
+            ex.Message);
+    }
+
+    [Fact]
     public async Task GetAccessTokenAsync_ThrowsTokenRefreshFailed_WhenProductionTokenEndpointIsNotHttps()
     {
         var handler = new CaptureRequestHandler();

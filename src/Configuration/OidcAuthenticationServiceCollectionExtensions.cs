@@ -368,25 +368,14 @@ public static class OidcAuthenticationServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        var tokenEndpoint = context.TokenEndpointRequest?.IssuerAddress;
+        var resolution = await OidcTokenEndpointResolver.ResolveAsync(
+            context.Options,
+            cancellationToken,
+            context.TokenEndpointRequest?.IssuerAddress);
+        var tokenEndpoint = resolution.TokenEndpoint;
         if (!string.IsNullOrWhiteSpace(tokenEndpoint))
         {
             return tokenEndpoint;
-        }
-
-        tokenEndpoint = context.Options.Configuration?.TokenEndpoint;
-        if (!string.IsNullOrWhiteSpace(tokenEndpoint))
-        {
-            return tokenEndpoint;
-        }
-
-        if (context.Options.ConfigurationManager is not null)
-        {
-            var configuration = await context.Options.ConfigurationManager.GetConfigurationAsync(cancellationToken);
-            if (!string.IsNullOrWhiteSpace(configuration.TokenEndpoint))
-            {
-                return configuration.TokenEndpoint;
-            }
         }
 
         throw new InvalidOperationException(

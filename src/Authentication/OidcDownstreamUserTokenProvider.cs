@@ -179,13 +179,10 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         }
 
         var openIdOptions = openIdConnectOptionsMonitor.Get(OpenIdConnectDefaults.AuthenticationScheme);
-        OidcTokenProviderLog.OidcMetadataRequested(logger, activeProviderOptions.Value.ProviderName);
-        var oidcConfiguration = await GetOidcConfigurationAsync(openIdOptions, cancellationToken, downstreamApiName);
-        var tokenEndpoint = oidcConfiguration.TokenEndpoint;
-        OidcTokenProviderLog.OidcMetadataLoaded(logger, activeProviderOptions.Value.ProviderName, !string.IsNullOrWhiteSpace(tokenEndpoint));
+        var tokenEndpoint = await GetTokenEndpointAsync(openIdOptions, cancellationToken, downstreamApiName);
         if (string.IsNullOrWhiteSpace(tokenEndpoint))
         {
-            throw new OidcTokenRefreshFailedException("The OIDC metadata does not contain a token endpoint.");
+            throw new OidcTokenRefreshFailedException("The OIDC token endpoint is not available from the static configuration or the OIDC metadata.");
         }
 
         var httpsRequirementError = OidcEndpointHttpsValidator.GetProductionRequirementError(tokenEndpoint, hostEnvironment, "the OIDC token endpoint");
@@ -364,14 +361,26 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         }
     }
 
-    private async Task<Microsoft.IdentityModel.Protocols.OpenIdConnect.OpenIdConnectConfiguration> GetOidcConfigurationAsync(
+    private async Task<string?> GetTokenEndpointAsync(
         OpenIdConnectOptions openIdOptions,
         CancellationToken cancellationToken,
         string downstreamApiName)
     {
         try
         {
-            return await openIdOptions.ConfigurationManager!.GetConfigurationAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(openIdOptions.Configuration?.TokenEndpoint) &&
+                openIdOptions.ConfigurationManager is not null)
+            {
+                OidcTokenProviderLog.OidcMetadataRequested(logger, activeProviderOptions.Value.ProviderName);
+            }
+
+            var resolution = await OidcTokenEndpointResolver.ResolveAsync(openIdOptions, cancellationToken);
+            if (resolution.UsedMetadata)
+            {
+                OidcTokenProviderLog.OidcMetadataLoaded(logger, activeProviderOptions.Value.ProviderName, !string.IsNullOrWhiteSpace(resolution.TokenEndpoint));
+            }
+
+            return resolution.TokenEndpoint;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

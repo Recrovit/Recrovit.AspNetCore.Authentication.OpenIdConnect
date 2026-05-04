@@ -16,8 +16,8 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 ### Bugs Fixed
 
 - Token endpoint resolution improvements
-  - Added dynamic token endpoint resolution for authorization code redemption.
-  - Refactored downstream token flows to use the resolved token endpoint more consistently.
+  - Added dynamic token endpoint resolution for authorization code redemption when the redemption request does not provide the issuer address directly.
+  - Updated downstream refresh token exchange to honor a preconfigured `OpenIdConnectOptions.Configuration` before falling back to metadata, and to fail with a controlled error when no token endpoint can be resolved.
 
 ### Other Changes
 
