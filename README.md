@@ -1,5 +1,5 @@
 # Recrovit.AspNetCore.Authentication.OpenIdConnect
-[![NuGet Version](https://img.shields.io/nuget/v/Recrovit.AspNetCore.Authentication.OpenIdConnect)](https://www.nuget.org/packages/Recrovit.AspNetCore.Authentication.OpenIdConnect/)
+[![NuGet Version](https://img.shields.io/nuget/v/Recrovit.AspNetCore.Authentication.OpenIdConnect?label=Latest%20release)](https://www.nuget.org/packages/Recrovit.AspNetCore.Authentication.OpenIdConnect/)
 
 `Recrovit.AspNetCore.Authentication.OpenIdConnect` is a reusable ASP.NET Core host infrastructure package for applications that authenticate users with OpenID Connect and then need to keep a usable authenticated session for downstream API access.
 
@@ -280,8 +280,12 @@ In development or simple single-instance local runs, you can usually omit it. In
 
 The package also supports certificate-based token endpoint authentication by using `private_key_jwt`.
 
-Set `ClientAuthenticationMethod` to `PrivateKeyJwt`, remove `ClientSecret`, and configure `ClientCertificate`.
-If you instantiate `OidcDownstreamUserTokenProvider` directly instead of resolving it from DI, use the constructor overload that accepts `IOidcClientAssertionService`; `PrivateKeyJwt` refresh token exchange requires that service.
+Set `ClientAuthenticationMethod` to `PrivateKeyJwt`, do not configure `ClientSecret`, and configure `ClientCertificate`.
+`ClientSecret` is not required for `PrivateKeyJwt`, because the token endpoint client authentication is performed with a signed client assertion instead.
+`ClientCertificate` is required for this mode.
+
+If you resolve `OidcDownstreamUserTokenProvider` from DI, the required `IOidcClientAssertionService` is wired automatically.
+If you instantiate `OidcDownstreamUserTokenProvider` directly, use the public constructor overload that accepts `IOidcClientAssertionService`; `PrivateKeyJwt` refresh token exchange requires that service and fails without it.
 
 ### PFX File Example
 
@@ -310,9 +314,12 @@ If you instantiate `OidcDownstreamUserTokenProvider` directly instead of resolvi
 }
 ```
 
+The `.pfx` file must contain a certificate with its private key. A public-certificate-only file is not sufficient, because the package uses that private key to sign the client assertion.
+
 ### Windows Certificate Store Example
 
 Windows hosts can also load the certificate from the Windows Certificate Store.
+`ClientCertificate:Source = WindowsStore` is supported only on Windows. On non-Windows hosts, package configuration validation rejects that source.
 
 ```json
 {
@@ -340,7 +347,9 @@ Windows hosts can also load the certificate from the Windows Certificate Store.
 }
 ```
 
-The certificate is loaded lazily and cached in memory for the lifetime of the application process. After configuration changes, restart the application so the package can reload the new certificate.
+The certificate is loaded lazily on first use, not during startup configuration.
+After it is loaded, it is cached in memory for the lifetime of the application process.
+If the PFX file or Windows Store certificate changes, the package does not reload it automatically; restart the process so the new certificate can be loaded.
 
 For `private_key_jwt` assertions, the package explicitly sets the JOSE `typ` header to `JWT`. Any certificate-derived key identifier headers such as `kid`, `x5t`, or `x5t#S256` are left to the underlying IdentityModel `X509SigningCredentials` behavior rather than being forced by the package. ECDSA certificate assertions also depend on the underlying IdentityModel/runtime algorithm support; when `ES256` signing is unavailable, the package does not attempt a fallback signature algorithm.
 
