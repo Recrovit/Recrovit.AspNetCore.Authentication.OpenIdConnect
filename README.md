@@ -342,6 +342,8 @@ Windows hosts can also load the certificate from the Windows Certificate Store.
 
 The certificate is loaded lazily and cached in memory for the lifetime of the application process. After configuration changes, restart the application so the package can reload the new certificate.
 
+For `private_key_jwt` assertions, the package explicitly sets the JOSE `typ` header to `JWT`. Any certificate-derived key identifier headers such as `kid`, `x5t`, or `x5t#S256` are left to the underlying IdentityModel `X509SigningCredentials` behavior rather than being forced by the package. ECDSA certificate assertions also depend on the underlying IdentityModel/runtime algorithm support; when `ES256` signing is unavailable, the package does not attempt a fallback signature algorithm.
+
 When an external identity provider redirects back to the configured callback path with a handled user-facing failure such as `access_denied`, `login_required`, or a canceled sign-in flow, the package redirects the browser to `Recrovit:OpenIdConnect:Host:RemoteFailureRedirectPath` instead of leaving the user on the raw `/signin-oidc` callback failure.
 
 The `Host` section also owns the local cookie session policy:

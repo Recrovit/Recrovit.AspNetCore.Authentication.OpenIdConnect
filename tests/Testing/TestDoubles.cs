@@ -604,6 +604,19 @@ internal static class TestCertificates
         File.WriteAllBytes(tempPath, certificate.Export(X509ContentType.Pkcs12, password));
         return new TemporaryPfxCertificate(tempPath, password, certificate);
     }
+
+    public static TemporaryPfxCertificate CreateTemporaryEcdsaPfx(string? password = "test-password")
+    {
+        using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest(
+            "CN=Recrovit.Test.Client",
+            ecdsa,
+            HashAlgorithmName.SHA256);
+        var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+        var tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"recrovit-oidc-{Guid.NewGuid():n}.pfx");
+        File.WriteAllBytes(tempPath, certificate.Export(X509ContentType.Pkcs12, password));
+        return new TemporaryPfxCertificate(tempPath, password, certificate);
+    }
 }
 
 internal sealed class StubDistributedCache : IDistributedCache
