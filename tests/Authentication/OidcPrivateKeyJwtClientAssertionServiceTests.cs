@@ -15,7 +15,7 @@ public sealed class OidcPrivateKeyJwtClientAssertionServiceTests
     private const string TokenEndpoint = "https://idp.example.com/connect/token";
 
     [Fact]
-    public void CreateClientAssertion_WithRsaCertificate_UsesExpectedHeaderValues()
+    public void CreateClientAssertion_WithRsaCertificate_UsesExpectedTypAndMatchesPresentCertificateDerivedHeaders()
     {
         using var certificate = TestCertificates.CreateTemporaryPfx();
         using var serviceProvider = CreateServiceProvider(certificate);
@@ -29,11 +29,11 @@ public sealed class OidcPrivateKeyJwtClientAssertionServiceTests
         Assert.Equal("JWT", Assert.IsType<string>(typ));
         Assert.Equal(SecurityAlgorithms.RsaSha256, token.Alg);
 
-        AssertHeaderMatchesCertificateBehavior(token, certificate.Certificate);
+        AssertPresentCertificateDerivedHeadersMatchIdentityModelBehavior(token, certificate.Certificate);
     }
 
     [Fact]
-    public void CreateClientAssertion_WithEcdsaCertificate_UsesExpectedHeaderValues()
+    public void CreateClientAssertion_WithEcdsaCertificate_UsesExpectedTypAndMatchesPresentCertificateDerivedHeaders()
     {
         SkipIfEcdsaCertificateAssertionsAreUnsupported();
 
@@ -49,7 +49,7 @@ public sealed class OidcPrivateKeyJwtClientAssertionServiceTests
         Assert.Equal("JWT", Assert.IsType<string>(typ));
         Assert.Equal(SecurityAlgorithms.EcdsaSha256, token.Alg);
 
-        AssertHeaderMatchesCertificateBehavior(token, certificate.Certificate);
+        AssertPresentCertificateDerivedHeadersMatchIdentityModelBehavior(token, certificate.Certificate);
     }
 
     private static ServiceProvider CreateServiceProvider(TemporaryPfxCertificate certificate)
@@ -68,7 +68,7 @@ public sealed class OidcPrivateKeyJwtClientAssertionServiceTests
         return services.BuildServiceProvider();
     }
 
-    private static void AssertHeaderMatchesCertificateBehavior(JsonWebToken token, X509Certificate2 certificate)
+    private static void AssertPresentCertificateDerivedHeadersMatchIdentityModelBehavior(JsonWebToken token, X509Certificate2 certificate)
     {
         var signingCredentials = new X509SigningCredentials(certificate);
         AssertHeaderValue(token, JwtHeaderParameterNames.Kid, expectedValue: signingCredentials.Key.KeyId);
@@ -109,6 +109,8 @@ public sealed class OidcPrivateKeyJwtClientAssertionServiceTests
 
         if (!hasHeader)
         {
+            // These certificate-derived headers are produced by IdentityModel when present,
+            // but the package does not require them to be emitted.
             return;
         }
 
