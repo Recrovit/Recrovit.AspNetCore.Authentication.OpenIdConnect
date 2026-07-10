@@ -2,7 +2,7 @@
 
 This file contains the release history for `Recrovit.AspNetCore.Authentication.OpenIdConnect`.
 
-## [10.1.0] - Unreleased
+## [10.1.0] - 2026-07-10
 
 ### Features Added
 
