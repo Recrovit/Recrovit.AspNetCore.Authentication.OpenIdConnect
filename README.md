@@ -1,5 +1,5 @@
 # Recrovit.AspNetCore.Authentication.OpenIdConnect
-[![NuGet Version](https://img.shields.io/nuget/v/Recrovit.AspNetCore.Authentication.OpenIdConnect)](https://www.nuget.org/packages/Recrovit.AspNetCore.Authentication.OpenIdConnect/)
+[![NuGet Version](https://img.shields.io/nuget/v/Recrovit.AspNetCore.Authentication.OpenIdConnect?label=Latest%20release)](https://www.nuget.org/packages/Recrovit.AspNetCore.Authentication.OpenIdConnect/)
 
 `Recrovit.AspNetCore.Authentication.OpenIdConnect` is a reusable ASP.NET Core host infrastructure package for applications that authenticate users with OpenID Connect and then need to keep a usable authenticated session for downstream API access.
 
@@ -126,7 +126,7 @@ Bound to `OidcProviderOptions`.
 Key responsibilities:
 
 - identity provider authority
-- OIDC client credentials
+- OIDC client credentials and certificate-based client authentication
 - callback and sign-out paths
 - extra login and identity scopes
 - UserInfo loading behavior
@@ -245,6 +245,7 @@ In development or simple single-instance local runs, you can usually omit it. In
         "MainProvider": {
           "Authority": "https://idp.example.com",
           "ClientId": "client-id",
+          "ClientAuthenticationMethod": "ClientSecretPost",
           "ClientSecret": "client-secret",
           "Scopes": [ "openid", "profile", "offline_access" ],
           "CallbackPath": "/signin-oidc",
@@ -274,6 +275,83 @@ In development or simple single-instance local runs, you can usually omit it. In
   }
 }
 ```
+
+## Certificate-Based Client Authentication
+
+The package also supports certificate-based token endpoint authentication by using `private_key_jwt`.
+
+Set `ClientAuthenticationMethod` to `PrivateKeyJwt`, do not configure `ClientSecret`, and configure `ClientCertificate`.
+`ClientSecret` is not required for `PrivateKeyJwt`, because the token endpoint client authentication is performed with a signed client assertion instead.
+`ClientCertificate` is required for this mode.
+
+If you resolve `OidcDownstreamUserTokenProvider` from DI, the required `IOidcClientAssertionService` is wired automatically.
+If you instantiate `OidcDownstreamUserTokenProvider` directly, use the public constructor overload that accepts `IOidcClientAssertionService`; `PrivateKeyJwt` refresh token exchange requires that service and fails without it.
+
+### PFX File Example
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Provider": "MainProvider",
+      "Providers": {
+        "MainProvider": {
+          "Authority": "https://idp.example.com",
+          "ClientId": "client-id",
+          "ClientAuthenticationMethod": "PrivateKeyJwt",
+          "ClientCertificate": {
+            "Source": "File",
+            "File": {
+              "Path": "/secrets/oidc-client.pfx",
+              "Password": "pfx-password"
+            }
+          },
+          "Scopes": [ "openid", "profile", "offline_access" ]
+        }
+      }
+    }
+  }
+}
+```
+
+The `.pfx` file must contain a certificate with its private key. A public-certificate-only file is not sufficient, because the package uses that private key to sign the client assertion.
+
+### Windows Certificate Store Example
+
+Windows hosts can also load the certificate from the Windows Certificate Store.
+`ClientCertificate:Source = WindowsStore` is supported only on Windows. On non-Windows hosts, package configuration validation rejects that source.
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Provider": "MainProvider",
+      "Providers": {
+        "MainProvider": {
+          "Authority": "https://idp.example.com",
+          "ClientId": "client-id",
+          "ClientAuthenticationMethod": "PrivateKeyJwt",
+          "ClientCertificate": {
+            "Source": "WindowsStore",
+            "Store": {
+              "Thumbprint": "ABCD1234EF567890ABCD1234EF567890ABCD1234",
+              "StoreName": "My",
+              "StoreLocation": "LocalMachine"
+            }
+          },
+          "Scopes": [ "openid", "profile", "offline_access" ]
+        }
+      }
+    }
+  }
+}
+```
+
+The certificate is loaded lazily on first use, not during startup configuration.
+After it is loaded, it is cached in memory for the lifetime of the application process.
+If the PFX file or Windows Store certificate changes, the package does not reload it automatically; restart the process so the new certificate can be loaded.
+
+For `private_key_jwt` assertions, the package explicitly sets the JOSE `typ` header to `JWT`. Any certificate-derived key identifier headers such as `kid`, `x5t`, or `x5t#S256` are left to the underlying IdentityModel `X509SigningCredentials` behavior rather than being forced by the package. ECDSA certificate assertions also depend on the underlying IdentityModel/runtime algorithm support; when `ES256` signing is unavailable, the package does not attempt a fallback signature algorithm.
 
 When an external identity provider redirects back to the configured callback path with a handled user-facing failure such as `access_denied`, `login_required`, or a canceled sign-in flow, the package redirects the browser to `Recrovit:OpenIdConnect:Host:RemoteFailureRedirectPath` instead of leaving the user on the raw `/signin-oidc` callback failure.
 

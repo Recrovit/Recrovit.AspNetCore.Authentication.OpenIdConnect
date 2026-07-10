@@ -27,8 +27,17 @@ public sealed class OidcProviderOptions
     /// <summary>
     /// Gets the OIDC client secret.
     /// </summary>
-    [Required]
-    public string ClientSecret { get; init; } = string.Empty;
+    public string? ClientSecret { get; init; }
+
+    /// <summary>
+    /// Gets the client authentication method used when calling the token endpoint.
+    /// </summary>
+    public OidcClientAuthenticationMethod ClientAuthenticationMethod { get; init; } = OidcClientAuthenticationMethod.ClientSecretPost;
+
+    /// <summary>
+    /// Gets the client certificate source settings used for certificate-based client authentication.
+    /// </summary>
+    public OidcClientCertificateOptions? ClientCertificate { get; init; }
 
     /// <summary>
     /// Gets the requested scopes.

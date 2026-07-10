@@ -30,7 +30,17 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
     private readonly IHttpClientFactory httpClientFactory;
     private readonly IOptionsMonitor<OpenIdConnectOptions> openIdConnectOptionsMonitor;
     private readonly IHostEnvironment hostEnvironment;
+    private readonly IOidcClientAssertionService? clientAssertionService;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="OidcDownstreamUserTokenProvider"/> class.
+    /// </summary>
+    /// <remarks>
+    /// This overload supports <see cref="OidcClientAuthenticationMethod.ClientSecretPost"/>.
+    /// When <see cref="OidcClientAuthenticationMethod.PrivateKeyJwt"/> is configured, use the overload
+    /// that accepts an <see cref="IOidcClientAssertionService"/> so the refresh token exchange can create
+    /// a client assertion.
+    /// </remarks>
     public OidcDownstreamUserTokenProvider(
         IDownstreamUserTokenStore tokenStore,
         DownstreamApiCatalog downstreamApiCatalog,
@@ -52,7 +62,44 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             logger,
             httpClientFactory,
             hostEnvironment,
-            openIdConnectOptionsMonitor)
+            openIdConnectOptionsMonitor,
+            clientAssertionService: null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="OidcDownstreamUserTokenProvider"/> class.
+    /// </summary>
+    /// <remarks>
+    /// Provide <paramref name="clientAssertionService"/> when
+    /// <see cref="OidcProviderOptions.ClientAuthenticationMethod"/> is
+    /// <see cref="OidcClientAuthenticationMethod.PrivateKeyJwt"/>. For
+    /// <see cref="OidcClientAuthenticationMethod.ClientSecretPost"/>, this parameter is optional.
+    /// </remarks>
+    public OidcDownstreamUserTokenProvider(
+        IDownstreamUserTokenStore tokenStore,
+        DownstreamApiCatalog downstreamApiCatalog,
+        IOptions<OidcProviderOptions> oidcOptions,
+        IOptions<ActiveOidcProviderOptions> activeProviderOptions,
+        IOptions<TokenCacheOptions> tokenCacheOptions,
+        ILogger<OidcDownstreamUserTokenProvider> logger,
+        IHttpClientFactory httpClientFactory,
+        IHostEnvironment hostEnvironment,
+        IOptionsMonitor<OpenIdConnectOptions> openIdConnectOptionsMonitor,
+        IOidcClientAssertionService? clientAssertionService)
+        : this(
+            tokenStore,
+            new UserRefreshLockProvider(activeProviderOptions),
+            downstreamApiCatalog,
+            new OidcScopeResolver(oidcOptions.Value.Scopes, downstreamApiCatalog),
+            oidcOptions,
+            activeProviderOptions,
+            tokenCacheOptions,
+            logger,
+            httpClientFactory,
+            hostEnvironment,
+            openIdConnectOptionsMonitor,
+            clientAssertionService)
     {
     }
 
@@ -67,7 +114,8 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         ILogger<OidcDownstreamUserTokenProvider> logger,
         IHttpClientFactory httpClientFactory,
         IHostEnvironment hostEnvironment,
-        IOptionsMonitor<OpenIdConnectOptions> openIdConnectOptionsMonitor)
+        IOptionsMonitor<OpenIdConnectOptions> openIdConnectOptionsMonitor,
+        IOidcClientAssertionService? clientAssertionService)
     {
         this.tokenStore = tokenStore;
         this.refreshLockProvider = refreshLockProvider;
@@ -80,6 +128,7 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         this.httpClientFactory = httpClientFactory;
         this.hostEnvironment = hostEnvironment;
         this.openIdConnectOptionsMonitor = openIdConnectOptionsMonitor;
+        this.clientAssertionService = clientAssertionService;
     }
 
     /// <inheritdoc />
@@ -130,13 +179,10 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         }
 
         var openIdOptions = openIdConnectOptionsMonitor.Get(OpenIdConnectDefaults.AuthenticationScheme);
-        OidcTokenProviderLog.OidcMetadataRequested(logger, activeProviderOptions.Value.ProviderName);
-        var oidcConfiguration = await GetOidcConfigurationAsync(openIdOptions, cancellationToken, downstreamApiName);
-        var tokenEndpoint = oidcConfiguration.TokenEndpoint;
-        OidcTokenProviderLog.OidcMetadataLoaded(logger, activeProviderOptions.Value.ProviderName, !string.IsNullOrWhiteSpace(tokenEndpoint));
+        var tokenEndpoint = await GetTokenEndpointAsync(openIdOptions, cancellationToken, downstreamApiName);
         if (string.IsNullOrWhiteSpace(tokenEndpoint))
         {
-            throw new OidcTokenRefreshFailedException("The OIDC metadata does not contain a token endpoint.");
+            throw new OidcTokenRefreshFailedException("The OIDC token endpoint is not available from the static configuration or the OIDC metadata.");
         }
 
         var httpsRequirementError = OidcEndpointHttpsValidator.GetProductionRequirementError(tokenEndpoint, hostEnvironment, "the OIDC token endpoint");
@@ -145,16 +191,18 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             throw new OidcTokenRefreshFailedException(httpsRequirementError);
         }
 
+        var refreshRequestBody = new Dictionary<string, string>
+        {
+            [OpenIdConnectParameterNames.GrantType] = OpenIdConnectGrantTypes.RefreshToken,
+            [OpenIdConnectParameterNames.RefreshToken] = sessionTokenSet.RefreshToken,
+            [OpenIdConnectParameterNames.ClientId] = oidcOptions.Value.ClientId,
+            [OpenIdConnectParameterNames.Scope] = string.Join(" ", requestedScopes)
+        };
+        ApplyClientAuthentication(refreshRequestBody, tokenEndpoint);
+
         using var request = new HttpRequestMessage(HttpMethod.Post, tokenEndpoint)
         {
-            Content = new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                [OpenIdConnectParameterNames.GrantType] = OpenIdConnectGrantTypes.RefreshToken,
-                [OpenIdConnectParameterNames.RefreshToken] = sessionTokenSet.RefreshToken,
-                [OpenIdConnectParameterNames.ClientId] = oidcOptions.Value.ClientId,
-                [OpenIdConnectParameterNames.ClientSecret] = oidcOptions.Value.ClientSecret,
-                [OpenIdConnectParameterNames.Scope] = string.Join(" ", requestedScopes)
-            })
+            Content = new FormUrlEncodedContent(refreshRequestBody)
         };
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(OidcAuthenticationConstants.MediaTypes.Json));
 
@@ -228,6 +276,25 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         return entry is null || entry.ExpiresAtUtc <= DateTimeOffset.UtcNow.Add(refreshSkew);
     }
 
+    private void ApplyClientAuthentication(IDictionary<string, string> formValues, string tokenEndpoint)
+    {
+        switch (oidcOptions.Value.ClientAuthenticationMethod)
+        {
+            case OidcClientAuthenticationMethod.ClientSecretPost:
+                formValues[OpenIdConnectParameterNames.ClientSecret] = oidcOptions.Value.ClientSecret
+                    ?? throw new InvalidOperationException("ClientSecretPost authentication requires a client secret.");
+                break;
+            case OidcClientAuthenticationMethod.PrivateKeyJwt:
+                var assertionService = clientAssertionService
+                    ?? throw new InvalidOperationException("PrivateKeyJwt authentication requires the OIDC client assertion service.");
+                formValues[OidcAuthenticationConstants.TokenNames.ClientAssertionType] = OidcAuthenticationConstants.ClientAssertions.JwtBearerType;
+                formValues[OpenIdConnectParameterNames.ClientAssertion] = assertionService.CreateClientAssertion(tokenEndpoint);
+                break;
+            default:
+                throw new InvalidOperationException($"Unsupported client authentication method '{oidcOptions.Value.ClientAuthenticationMethod}'.");
+        }
+    }
+
     private void ValidateAdvertisedScopes(string downstreamApiName, IReadOnlyCollection<string> requestedScopes, string accessToken)
     {
         var tokenScopes = TryReadAdvertisedScopes(accessToken);
@@ -294,14 +361,26 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         }
     }
 
-    private async Task<Microsoft.IdentityModel.Protocols.OpenIdConnect.OpenIdConnectConfiguration> GetOidcConfigurationAsync(
+    private async Task<string?> GetTokenEndpointAsync(
         OpenIdConnectOptions openIdOptions,
         CancellationToken cancellationToken,
         string downstreamApiName)
     {
         try
         {
-            return await openIdOptions.ConfigurationManager!.GetConfigurationAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(openIdOptions.Configuration?.TokenEndpoint) &&
+                openIdOptions.ConfigurationManager is not null)
+            {
+                OidcTokenProviderLog.OidcMetadataRequested(logger, activeProviderOptions.Value.ProviderName);
+            }
+
+            var resolution = await OidcTokenEndpointResolver.ResolveAsync(openIdOptions, cancellationToken);
+            if (resolution.UsedMetadata)
+            {
+                OidcTokenProviderLog.OidcMetadataLoaded(logger, activeProviderOptions.Value.ProviderName, !string.IsNullOrWhiteSpace(resolution.TokenEndpoint));
+            }
+
+            return resolution.TokenEndpoint;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
