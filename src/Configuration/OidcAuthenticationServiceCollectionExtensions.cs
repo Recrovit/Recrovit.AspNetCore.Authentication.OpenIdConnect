@@ -47,7 +47,8 @@ public static class OidcAuthenticationServiceCollectionExtensions
         var activeProviderName = OpenIdConnectConfigurationResolver.GetActiveProviderName(configuration);
         var providerSection = OpenIdConnectConfigurationResolver.GetActiveProviderSection(configuration);
         var downstreamApisSection = OpenIdConnectConfigurationResolver.GetDownstreamApisSection(configuration);
-        var downstreamApiCatalog = DownstreamApiCatalog.Create(downstreamApisSection);
+        var providerDownstreamApisSection = OpenIdConnectConfigurationResolver.GetActiveProviderDownstreamApisSection(configuration);
+        var downstreamApiCatalog = DownstreamApiCatalog.Create(downstreamApisSection, providerDownstreamApisSection);
         var configuredProviderOptions = providerSection.Get<OidcProviderOptions>()
             ?? throw new InvalidOperationException("The OIDC configuration could not be loaded.");
         var scopeResolver = new OidcScopeResolver(configuredProviderOptions.Scopes, downstreamApiCatalog);

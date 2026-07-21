@@ -2,6 +2,21 @@
 
 This file contains the release history for `Recrovit.AspNetCore.Authentication.OpenIdConnect`.
 
+## [Unreleased]
+
+### Features Added
+
+- Provider-specific downstream API overrides
+  - Added support for `Recrovit:OpenIdConnect:Providers:<provider>:DownstreamApis` overrides on top of the shared downstream API catalog.
+  - Allowed provider-specific downstream API entries to override base URL and relative path values, and to replace the shared scope list when a provider-specific `Scopes` section is present.
+  - Added `Disabled` support on downstream API definitions so shared or provider-specific entries can be removed from the effective catalog.
+
+### Other Changes
+
+- Downstream API configuration coverage
+  - Added tests covering provider-specific downstream API overrides and disabling behavior.
+  - Expanded configuration documentation for provider-level downstream API customization and disabling.
+
 ## [10.1.0] - 2026-07-10
 
 ### Features Added

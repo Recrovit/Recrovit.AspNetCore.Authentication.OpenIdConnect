@@ -42,6 +42,27 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesSessionValidationDownstreamApiName_WhenProviderDisablesApi()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Host:SessionValidationDownstreamApiName"] = "SessionValidationApi",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = "https://api.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:SessionValidationApi:Disabled"] = "true"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
+
+        Assert.Contains("SessionValidationDownstreamApiName", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_BindsRemoteFailureRedirectPath()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
@@ -263,6 +284,52 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
             .Get(Microsoft.AspNetCore.Authentication.OpenIdConnect.OpenIdConnectDefaults.AuthenticationScheme);
 
         Assert.Equal(["graph.read", "openid", "profile"], oidcOptions.Scope.OrderBy(scope => scope, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesEffectiveProviderOverridesForDownstreamCatalog()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:BaseUrl"] = "https://graph.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:RelativePath"] = "graph",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:BaseUrl"] = "https://provider-graph.example.com",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:RelativePath"] = "graph/v2",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:Scopes:0"] = "graph.write"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var catalog = serviceProvider.GetRequiredService<DownstreamApiCatalog>();
+        var api = catalog.GetRequired("GraphApi");
+
+        Assert.Equal("https://provider-graph.example.com", api.BaseUrl);
+        Assert.Equal("graph/v2", api.RelativePath);
+        Assert.Equal(["graph.write"], api.Scopes);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ExcludesDisabledApisFromLoginScopes()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:Scopes:0"] = "openid",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:BaseUrl"] = "https://graph.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:Disabled"] = "true"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var oidcOptions = serviceProvider.GetRequiredService<IOptionsMonitor<Microsoft.AspNetCore.Authentication.OpenIdConnect.OpenIdConnectOptions>>()
+            .Get(Microsoft.AspNetCore.Authentication.OpenIdConnect.OpenIdConnectDefaults.AuthenticationScheme);
+
+        Assert.Equal(["openid"], oidcOptions.Scope.OrderBy(scope => scope, StringComparer.Ordinal).ToArray());
     }
 
     [Fact]

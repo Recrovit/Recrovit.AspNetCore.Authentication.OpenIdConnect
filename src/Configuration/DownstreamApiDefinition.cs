@@ -22,4 +22,9 @@ public sealed class DownstreamApiDefinition
     /// Gets the relative path appended to the base URL.
     /// </summary>
     public string RelativePath { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Gets a value indicating whether the downstream API is disabled.
+    /// </summary>
+    public bool Disabled { get; init; }
 }

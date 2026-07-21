@@ -39,4 +39,86 @@ public sealed class DownstreamApiCatalogTests
 
         Assert.Empty(catalog.Apis);
     }
+
+    [Fact]
+    public void Create_MergesProviderOverrides_PerField()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [$"{RootSectionName}:DownstreamApis:GraphApi:BaseUrl"] = "https://graph.example.com",
+                [$"{RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read",
+                [$"{RootSectionName}:DownstreamApis:GraphApi:RelativePath"] = "graph",
+                [$"{RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:BaseUrl"] = "https://graph-provider.example.com",
+                [$"{RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:RelativePath"] = "graph/v2"
+            })
+            .Build();
+
+        var catalog = DownstreamApiCatalog.Create(
+            configuration.GetSection($"{RootSectionName}:DownstreamApis"),
+            configuration.GetSection($"{RootSectionName}:Providers:Duende:DownstreamApis"));
+
+        var api = catalog.GetRequired("GraphApi");
+        Assert.Equal("https://graph-provider.example.com", api.BaseUrl);
+        Assert.Equal("graph/v2", api.RelativePath);
+        Assert.Equal(["graph.read"], api.Scopes);
+    }
+
+    [Fact]
+    public void Create_ReplacesScopes_WhenProviderScopesSpecified()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [$"{RootSectionName}:DownstreamApis:GraphApi:BaseUrl"] = "https://graph.example.com",
+                [$"{RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read",
+                [$"{RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:Scopes:0"] = "graph.write"
+            })
+            .Build();
+
+        var catalog = DownstreamApiCatalog.Create(
+            configuration.GetSection($"{RootSectionName}:DownstreamApis"),
+            configuration.GetSection($"{RootSectionName}:Providers:Duende:DownstreamApis"));
+
+        Assert.Equal(["graph.write"], catalog.GetRequired("GraphApi").Scopes);
+    }
+
+    [Fact]
+    public void Create_RemovesDisabledApi_FromEffectiveCatalog()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [$"{RootSectionName}:DownstreamApis:GraphApi:BaseUrl"] = "https://graph.example.com",
+                [$"{RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read",
+                [$"{RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:Disabled"] = "true"
+            })
+            .Build();
+
+        var catalog = DownstreamApiCatalog.Create(
+            configuration.GetSection($"{RootSectionName}:DownstreamApis"),
+            configuration.GetSection($"{RootSectionName}:Providers:Duende:DownstreamApis"));
+
+        Assert.False(catalog.Apis.ContainsKey("GraphApi"));
+    }
+
+    [Fact]
+    public void Create_AllowsProviderOnlyApi()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [$"{RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:BaseUrl"] = "https://graph-provider.example.com",
+                [$"{RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:Scopes:0"] = "graph.read"
+            })
+            .Build();
+
+        var catalog = DownstreamApiCatalog.Create(
+            configuration.GetSection($"{RootSectionName}:DownstreamApis"),
+            configuration.GetSection($"{RootSectionName}:Providers:Duende:DownstreamApis"));
+
+        var api = catalog.GetRequired("GraphApi");
+        Assert.Equal("https://graph-provider.example.com", api.BaseUrl);
+        Assert.Equal(["graph.read"], api.Scopes);
+    }
 }

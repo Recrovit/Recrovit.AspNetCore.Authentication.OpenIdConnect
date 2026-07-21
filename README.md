@@ -146,6 +146,19 @@ The catalog is used both for validation and for runtime token access.
 
 At sign-in, the package automatically unions every configured downstream API scope with `Provider:Scopes` so the initial consent surface already covers all configured APIs.
 
+Provider-specific overrides can also be configured under `Recrovit:OpenIdConnect:Providers:<provider>:DownstreamApis`.
+
+Precedence rules:
+
+- the shared `DownstreamApis` section provides the base definition
+- provider-specific entries override only the fields they define
+- provider-specific `Scopes` replaces the shared scope list when the section is present
+- `Disabled: true` removes the downstream API from the effective catalog entirely
+
+Each downstream API definition also supports:
+
+- `Disabled`
+
 ## Downstream API Proxy Endpoints
 
 When a host needs to expose configured downstream APIs through the authenticated application, the package can map generic proxy endpoints for every entry in `Recrovit:OpenIdConnect:DownstreamApis`.
@@ -253,7 +266,15 @@ In development or simple single-instance local runs, you can usually omit it. In
           "RemoteSignOutPath": "/signout-oidc",
           "SignedOutRedirectPath": "/",
           "GetClaimsFromUserInfoEndpoint": true,
-          "RequireHttpsMetadata": true
+          "RequireHttpsMetadata": true,
+          "DownstreamApis": {
+            "SessionValidationApi": {
+              "RelativePath": "session/provider-check"
+            },
+            "LegacyApi": {
+              "Disabled": true
+            }
+          }
         }
       },
       "DownstreamApis": {
@@ -261,6 +282,11 @@ In development or simple single-instance local runs, you can usually omit it. In
           "BaseUrl": "https://api.example.com",
           "Scopes": [ "api.scope" ],
           "RelativePath": "session/check"
+        },
+        "LegacyApi": {
+          "BaseUrl": "https://legacy.example.com",
+          "Scopes": [ "legacy.read" ],
+          "RelativePath": "legacy"
         }
       },
       "TokenCache": {
