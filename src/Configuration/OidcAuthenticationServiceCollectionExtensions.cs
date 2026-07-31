@@ -156,7 +156,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
         services.AddSingleton(downstreamApiCatalog);
         services.AddSingleton(scopeResolver);
-        services.AddSingleton<IUserRefreshLockProvider>(serviceProvider => new UserRefreshLockProvider(
+        services.AddSingleton<IOidcSessionRefreshLockProvider>(serviceProvider => new UserRefreshLockProvider(
             serviceProvider.GetRequiredService<IOptions<ActiveOidcProviderOptions>>(),
             serviceProvider.GetRequiredService<IOptions<TokenCacheOptions>>(),
             serviceProvider.GetRequiredService<TimeProvider>()));
@@ -178,7 +178,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddScoped<IDownstreamUserTokenProvider>(serviceProvider => new OidcDownstreamUserTokenProvider(
             serviceProvider.GetRequiredService<IDownstreamUserTokenStore>(),
             serviceProvider.GetRequiredService<IOidcSessionStateStore>(),
-            serviceProvider.GetRequiredService<IUserRefreshLockProvider>(),
+            serviceProvider.GetRequiredService<IOidcSessionRefreshLockProvider>(),
             serviceProvider.GetRequiredService<DownstreamApiCatalog>(),
             serviceProvider.GetRequiredService<OidcScopeResolver>(),
             serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>(),
@@ -188,7 +188,8 @@ public static class OidcAuthenticationServiceCollectionExtensions
             serviceProvider.GetRequiredService<IHttpClientFactory>(),
             serviceProvider.GetRequiredService<IWebHostEnvironment>(),
             serviceProvider.GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>(),
-            serviceProvider.GetRequiredService<IOidcClientAssertionService>()));
+            serviceProvider.GetRequiredService<IOidcClientAssertionService>(),
+            serviceProvider.GetRequiredService<TimeProvider>()));
         services.AddScoped<OidcSessionCleanupService>();
 
         services.AddAuthentication(options =>
@@ -555,9 +556,9 @@ public static class OidcAuthenticationServiceCollectionExtensions
         {
             return app =>
             {
-                ValidateProductionReadiness(app.ApplicationServices, environment);
-                next(app);
-            };
+            ValidateProductionReadiness(app.ApplicationServices, environment);
+            next(app);
+        };
         }
 
         private static void ValidateProductionReadiness(IServiceProvider services, IWebHostEnvironment environment)
@@ -588,6 +589,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
             }
 
             ValidateDataProtectionConfiguration(services, environment, logger, hostSecurityOptions);
+            ValidateTokenRefreshCoordinationConfiguration(services, logger);
 
             if (!environment.IsProduction())
             {
@@ -636,6 +638,33 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 throw new InvalidOperationException(
                     "Production requires a shared distributed cache for user token storage. Replace AddDistributedMemoryCache with a shared implementation.");
             }
+        }
+    }
+
+    private static void ValidateTokenRefreshCoordinationConfiguration(IServiceProvider services, ILogger logger)
+    {
+        var tokenCacheOptions = services.GetRequiredService<IOptions<TokenCacheOptions>>().Value;
+        if (tokenCacheOptions.DeploymentMode != TokenCacheDeploymentMode.MultiInstance)
+        {
+            return;
+        }
+
+        var refreshLockProvider = services.GetRequiredService<IOidcSessionRefreshLockProvider>();
+        if (refreshLockProvider is UserRefreshLockProvider)
+        {
+            const string refreshLockMessage =
+                "TokenCache:DeploymentMode is set to MultiInstance, but the default in-process refresh lock provider is still registered. Replace IOidcSessionRefreshLockProvider with a cross-node implementation before production use.";
+            OidcInfrastructureLog.StartupValidationFailed(logger, "multi-instance-refresh-lock", refreshLockMessage);
+            throw new InvalidOperationException(refreshLockMessage);
+        }
+
+        var sessionStateStore = services.GetRequiredService<IOidcSessionStateStore>();
+        if (sessionStateStore is DistributedDownstreamUserTokenStore)
+        {
+            const string sessionStateStoreMessage =
+                "TokenCache:DeploymentMode is set to MultiInstance, but the default distributed token store is still registered. Replace IOidcSessionStateStore with an implementation that provides atomic cross-node compare-and-swap semantics before production use.";
+            OidcInfrastructureLog.StartupValidationFailed(logger, "multi-instance-session-state-store", sessionStateStoreMessage);
+            throw new InvalidOperationException(sessionStateStoreMessage);
         }
     }
 

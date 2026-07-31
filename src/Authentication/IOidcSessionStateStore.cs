@@ -15,6 +15,10 @@ public interface IOidcSessionStateStore
     /// <summary>
     /// Attempts to replace the complete stored token state when the stored concurrency version matches the expected value.
     /// </summary>
+    /// <remarks>
+    /// In <c>MultiInstance</c> deployments, implementations are expected to provide an atomic compare-and-swap operation
+    /// across nodes. A read-then-write sequence backed only by best-effort cache semantics is not sufficient.
+    /// </remarks>
     Task<bool> TryCompareAndSwapSessionStateAsync(
         ClaimsPrincipal user,
         string? expectedVersion,

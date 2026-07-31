@@ -26,6 +26,11 @@ public sealed class TokenCacheOptions
     public string CacheKeyHmacSecret { get; init; } = "development-only-shared-hmac-secret";
 
     /// <summary>
+    /// Gets whether the token cache is expected to run on one node or across multiple application instances.
+    /// </summary>
+    public TokenCacheDeploymentMode DeploymentMode { get; init; } = TokenCacheDeploymentMode.SingleInstance;
+
+    /// <summary>
     /// Gets how many seconds before expiry token refresh should start.
     /// </summary>
     [Range(0, 3600)]

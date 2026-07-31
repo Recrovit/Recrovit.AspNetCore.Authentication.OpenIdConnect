@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.Extensions.DependencyInjection;
@@ -393,6 +394,71 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     [Fact]
+    public async Task GetAccessTokenAsync_ReusesLatestStoredToken_WhenCompareAndSwapLosesConcurrentUpdate()
+    {
+        var user = TestUsers.CreateAuthenticatedUser();
+        var tokenStore = new CompareAndSwapConflictSessionStateStore(
+            user,
+            new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            },
+            new CachedDownstreamApiTokenEntry
+            {
+                AccessToken = "concurrent-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+            },
+            new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "rotated-refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            });
+        var loggerFactory = new ListLoggerFactory();
+        var provider = CreateProvider(
+            tokenStore,
+            new StubHttpClientFactory(CreateTokenResponse(
+                accessToken: "fresh-token",
+                refreshToken: "fresh-refresh")),
+            loggerFactory: loggerFactory);
+
+        var token = await provider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None);
+
+        Assert.Equal("concurrent-token", token);
+        Assert.Equal(1, tokenStore.CompareAndSwapAttempts);
+        Assert.Contains(loggerFactory.Entries, entry => entry.EventId.Name == "RefreshedTokensReusedAfterConcurrentUpdate");
+    }
+
+    [Fact]
+    public async Task GetAccessTokenAsync_DoesNotPersistRefreshResult_WhenLeaseExpiresBeforeWrite()
+    {
+        var user = TestUsers.CreateAuthenticatedUser();
+        var tokenStore = new InMemoryTokenStore(user, new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+        });
+        var timeProvider = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var loggerFactory = new ListLoggerFactory();
+        var provider = CreateProvider(
+            tokenStore,
+            new DelegatingHttpClientFactory(new AdvanceTimeHandler(
+                CreateTokenResponse(accessToken: "fresh-token", refreshToken: "fresh-refresh"),
+                timeProvider,
+                TimeSpan.FromSeconds(5))),
+            loggerFactory: loggerFactory,
+            refreshLockProvider: new FixedLeaseRefreshLockProvider("lease-owner", timeProvider.GetUtcNow().AddSeconds(1)),
+            timeProvider: timeProvider);
+
+        var exception = await Assert.ThrowsAsync<OidcTokenRefreshFailedException>(() =>
+            provider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None));
+
+        Assert.Contains("could not be persisted", exception.Message, StringComparison.Ordinal);
+        Assert.Null(await tokenStore.GetApiTokenAsync(user, "SessionValidationApi", ["openid"], CancellationToken.None));
+        Assert.Contains(loggerFactory.Entries, entry => entry.EventId.Name == "RefreshLockLeaseExpired");
+    }
+
+    [Fact]
     public async Task GetAccessTokenAsync_LogsRefreshFlowEventsWithoutSensitiveValues()
     {
         var loggerFactory = new ListLoggerFactory();
@@ -602,12 +668,15 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     private static IDownstreamUserTokenProvider CreateProvider(
-        InMemoryTokenStore tokenStore,
+        IDownstreamUserTokenStore tokenStore,
         IHttpClientFactory httpClientFactory,
         FakeWebHostEnvironment? environment = null,
         ListLoggerFactory? loggerFactory = null,
         IOptionsMonitor<OpenIdConnectOptions>? openIdOptionsMonitor = null,
-        Dictionary<string, string?>? configurationOverrides = null)
+        Dictionary<string, string?>? configurationOverrides = null,
+        IOidcSessionStateStore? sessionStateStore = null,
+        IOidcSessionRefreshLockProvider? refreshLockProvider = null,
+        TimeProvider? timeProvider = null)
     {
         var services = new ServiceCollection();
         environment ??= new FakeWebHostEnvironment { EnvironmentName = Environments.Development };
@@ -629,12 +698,23 @@ public sealed class OidcDownstreamUserTokenProviderTests
 
         services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(overrides), environment);
         services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
-        services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
+        services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ =>
+            sessionStateStore ?? (tokenStore as IOidcSessionStateStore ?? throw new InvalidOperationException("Token store must implement IOidcSessionStateStore."))));
         services.Replace(ServiceDescriptor.Singleton(httpClientFactory));
         services.Replace(ServiceDescriptor.Singleton<IOptionsMonitor<OpenIdConnectOptions>>(openIdOptionsMonitor ?? new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
         {
             ConfigurationManager = new StaticConfigurationManager("https://idp.example.com/connect/token")
         })));
+
+        if (refreshLockProvider is not null)
+        {
+            services.Replace(ServiceDescriptor.Singleton(refreshLockProvider));
+        }
+
+        if (timeProvider is not null)
+        {
+            services.Replace(ServiceDescriptor.Singleton(timeProvider));
+        }
 
         if (loggerFactory is not null)
         {
@@ -746,5 +826,153 @@ public sealed class OidcDownstreamUserTokenProviderTests
                     ? Uri.UnescapeDataString(parts[1].Replace("+", "%20", StringComparison.Ordinal))
                     : string.Empty,
                 StringComparer.Ordinal);
+    }
+
+    private sealed class AdvanceTimeHandler(
+        string payload,
+        MutableTimeProvider timeProvider,
+        TimeSpan advanceBy) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            timeProvider.Advance(advanceBy);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(payload)
+            });
+        }
+    }
+
+    private sealed class CompareAndSwapConflictSessionStateStore : IDownstreamUserTokenStore, IOidcSessionStateStore
+    {
+        private readonly string apiKey;
+        private string version = "v1";
+        private OidcSessionState state;
+
+        public CompareAndSwapConflictSessionStateStore(
+            ClaimsPrincipal user,
+            StoredOidcSessionTokenSet initialSessionTokenSet,
+            CachedDownstreamApiTokenEntry replacementTokenEntry,
+            StoredOidcSessionTokenSet replacementSessionTokenSet)
+        {
+            apiKey = CreateApiKey("SessionValidationApi", ["openid"]);
+            state = new OidcSessionState
+            {
+                SessionTokens = Clone(initialSessionTokenSet),
+                ApiTokens = new Dictionary<string, CachedDownstreamApiTokenEntry>(StringComparer.Ordinal)
+            };
+            ReplacementTokenEntry = replacementTokenEntry;
+            ReplacementSessionTokenSet = replacementSessionTokenSet;
+        }
+
+        public int CompareAndSwapAttempts { get; private set; }
+
+        private CachedDownstreamApiTokenEntry ReplacementTokenEntry { get; }
+
+        private StoredOidcSessionTokenSet ReplacementSessionTokenSet { get; }
+
+        public Task<StoredOidcSessionTokenSet?> GetSessionTokenSetAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+            => Task.FromResult(state.SessionTokens is null ? null : Clone(state.SessionTokens));
+
+        public Task StoreSessionTokenSetAsync(ClaimsPrincipal user, StoredOidcSessionTokenSet tokenSet, CancellationToken cancellationToken)
+        {
+            state.SessionTokens = Clone(tokenSet);
+            version = Guid.NewGuid().ToString("n");
+            return Task.CompletedTask;
+        }
+
+        public Task<CachedDownstreamApiTokenEntry?> GetApiTokenAsync(ClaimsPrincipal user, string downstreamApiName, IReadOnlyCollection<string> scopes, CancellationToken cancellationToken)
+            => Task.FromResult(state.ApiTokens.TryGetValue(apiKey, out var token) ? Clone(token) : null);
+
+        public Task StoreApiTokenAsync(ClaimsPrincipal user, string downstreamApiName, IReadOnlyCollection<string> scopes, CachedDownstreamApiTokenEntry tokenEntry, CancellationToken cancellationToken)
+        {
+            state.ApiTokens[apiKey] = Clone(tokenEntry);
+            version = Guid.NewGuid().ToString("n");
+            return Task.CompletedTask;
+        }
+
+        public Task RemoveAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+        {
+            state = new OidcSessionState();
+            version = Guid.NewGuid().ToString("n");
+            return Task.CompletedTask;
+        }
+
+        public Task<VersionedOidcSessionState?> GetSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+            => Task.FromResult<VersionedOidcSessionState?>(new VersionedOidcSessionState(version, Clone(state)));
+
+        public Task<bool> TryCompareAndSwapSessionStateAsync(ClaimsPrincipal user, string? expectedVersion, OidcSessionState newState, CancellationToken cancellationToken)
+        {
+            CompareAndSwapAttempts++;
+            if (CompareAndSwapAttempts == 1)
+            {
+                state = new OidcSessionState
+                {
+                    SessionTokens = Clone(ReplacementSessionTokenSet),
+                    ApiTokens = new Dictionary<string, CachedDownstreamApiTokenEntry>(StringComparer.Ordinal)
+                    {
+                        [apiKey] = Clone(ReplacementTokenEntry)
+                    }
+                };
+                version = Guid.NewGuid().ToString("n");
+                return Task.FromResult(false);
+            }
+
+            if (!string.Equals(version, expectedVersion, StringComparison.Ordinal))
+            {
+                return Task.FromResult(false);
+            }
+
+            state = Clone(newState);
+            version = Guid.NewGuid().ToString("n");
+            return Task.FromResult(true);
+        }
+
+        public Task DeleteSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+            => RemoveAsync(user, cancellationToken);
+
+        private static string CreateApiKey(string downstreamApiName, IReadOnlyCollection<string> scopes)
+        {
+            var normalizedScopes = scopes
+                .Where(scope => !string.IsNullOrWhiteSpace(scope))
+                .Select(scope => scope.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(scope => scope, StringComparer.Ordinal);
+            var serializedScopes = string.Join(" ", normalizedScopes);
+            var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(serializedScopes));
+            return $"{downstreamApiName}:{Convert.ToHexString(hash)}";
+        }
+
+        private static StoredOidcSessionTokenSet Clone(StoredOidcSessionTokenSet tokenSet)
+        {
+            return new StoredOidcSessionTokenSet
+            {
+                RefreshToken = tokenSet.RefreshToken,
+                IdToken = tokenSet.IdToken,
+                ExpiresAtUtc = tokenSet.ExpiresAtUtc
+            };
+        }
+
+        private static CachedDownstreamApiTokenEntry Clone(CachedDownstreamApiTokenEntry tokenEntry)
+        {
+            return new CachedDownstreamApiTokenEntry
+            {
+                AccessToken = tokenEntry.AccessToken,
+                ExpiresAtUtc = tokenEntry.ExpiresAtUtc
+            };
+        }
+
+        private static OidcSessionState Clone(OidcSessionState source)
+        {
+            return new OidcSessionState
+            {
+                SessionTokens = source.SessionTokens is null ? null : Clone(source.SessionTokens),
+                ApiTokens = source.ApiTokens.ToDictionary(
+                    entry => entry.Key,
+                    entry => Clone(entry.Value),
+                    StringComparer.Ordinal),
+                LastRefreshUtc = source.LastRefreshUtc
+            };
+        }
     }
 }

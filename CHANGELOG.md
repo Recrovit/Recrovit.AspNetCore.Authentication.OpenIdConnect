@@ -36,6 +36,11 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 - Session token refresh concurrency and cache hardening
   - Reworked stored token persistence around a single versioned session payload so refresh token rotation and downstream API token updates are coordinated through compare-and-swap writes.
   - Changed refresh coordination from per-API in-process locking to session-scoped locking with lease metadata, and wired the provider refresh flow to re-read and retry on concurrent state changes.
+  - Added `TokenCacheOptions.DeploymentMode` with `SingleInstance` default behavior and `MultiInstance` fail-fast startup validation when the host keeps the default single-node refresh lock or default non-atomic session-state store.
+  - Added public `IOidcSessionRefreshLockProvider` and `IOidcSessionRefreshLockLease` contracts so hosts can replace refresh coordination with cross-node implementations.
+  - Tightened the documented `IOidcSessionStateStore` contract so `MultiInstance` deployments require atomic cross-node compare-and-swap semantics for the full session aggregate.
+  - Discarded refresh results when the acquired lease has already expired before persistence, and reuses newer stored token state after compare-and-swap contention instead of overwriting it.
+  - Deletes corrupted protected session-state payloads from the cache after logging a warning so broken entries deterministically lead to cleanup and reauthentication.
   - Replaced raw subject, issuer, and session-id cache key segments with HMAC-derived session fingerprints so external cache keys no longer expose reversible identity metadata.
   - Removed the separate API-token index model so logout and session cleanup deterministically delete the entire stored token state for the authenticated session.
 
@@ -54,7 +59,7 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Added regression coverage for allowed same-site proxy `GET` requests, blocked cross-site browser `GET` requests, and custom-header fallback behavior.
 - Token state architecture and documentation
   - Added `IOidcSessionStateStore`, versioned session-state types, HMAC cache-key derivation, and configuration coverage for the new token-state model.
-  - Updated token lifecycle and production configuration documentation to describe the session-aggregate store, shared HMAC secret requirement, and multi-instance refresh coordination expectations.
+  - Updated token lifecycle and production configuration documentation to describe the session-aggregate store, shared HMAC secret requirement, deployment-mode semantics, and multi-instance refresh coordination expectations.
 
 
 ## [10.1.0] - 2026-07-10

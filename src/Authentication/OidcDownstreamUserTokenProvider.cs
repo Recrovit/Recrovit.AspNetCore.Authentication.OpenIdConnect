@@ -20,7 +20,7 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvider
 {
     private readonly IOidcSessionStateStore sessionStateStore;
-    private readonly IUserRefreshLockProvider refreshLockProvider;
+    private readonly IOidcSessionRefreshLockProvider refreshLockProvider;
     private readonly DownstreamApiCatalog downstreamApiCatalog;
     private readonly OidcScopeResolver scopeResolver;
     private readonly IOptions<OidcProviderOptions> oidcOptions;
@@ -31,6 +31,7 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
     private readonly IOptionsMonitor<OpenIdConnectOptions> openIdConnectOptionsMonitor;
     private readonly IHostEnvironment hostEnvironment;
     private readonly IOidcClientAssertionService? clientAssertionService;
+    private readonly TimeProvider timeProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="OidcDownstreamUserTokenProvider"/> class.
@@ -64,7 +65,8 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             httpClientFactory,
             hostEnvironment,
             openIdConnectOptionsMonitor,
-            clientAssertionService: null)
+            clientAssertionService: null,
+            TimeProvider.System)
     {
     }
 
@@ -101,14 +103,15 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             httpClientFactory,
             hostEnvironment,
             openIdConnectOptionsMonitor,
-            clientAssertionService)
+            clientAssertionService,
+            TimeProvider.System)
     {
     }
 
     internal OidcDownstreamUserTokenProvider(
         IDownstreamUserTokenStore tokenStore,
         IOidcSessionStateStore sessionStateStore,
-        IUserRefreshLockProvider refreshLockProvider,
+        IOidcSessionRefreshLockProvider refreshLockProvider,
         DownstreamApiCatalog downstreamApiCatalog,
         OidcScopeResolver scopeResolver,
         IOptions<OidcProviderOptions> oidcOptions,
@@ -118,7 +121,8 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         IHttpClientFactory httpClientFactory,
         IHostEnvironment hostEnvironment,
         IOptionsMonitor<OpenIdConnectOptions> openIdConnectOptionsMonitor,
-        IOidcClientAssertionService? clientAssertionService)
+        IOidcClientAssertionService? clientAssertionService,
+        TimeProvider timeProvider)
     {
         _ = tokenStore;
         this.sessionStateStore = sessionStateStore;
@@ -133,6 +137,7 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         this.hostEnvironment = hostEnvironment;
         this.openIdConnectOptionsMonitor = openIdConnectOptionsMonitor;
         this.clientAssertionService = clientAssertionService;
+        this.timeProvider = timeProvider;
     }
 
     /// <inheritdoc />
@@ -163,10 +168,6 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             return entry!.AccessToken;
         }
 
-        OidcTokenProviderLog.RefreshLockWaiting(logger, downstreamApiName);
-        await using var refreshLock = await refreshLockProvider.AcquireAsync(user, cancellationToken);
-        OidcTokenProviderLog.RefreshLockAcquired(logger, downstreamApiName);
-
         var openIdOptions = openIdConnectOptionsMonitor.Get(OpenIdConnectDefaults.AuthenticationScheme);
         var tokenEndpoint = await GetTokenEndpointAsync(openIdOptions, cancellationToken, downstreamApiName);
         if (string.IsNullOrWhiteSpace(tokenEndpoint))
@@ -184,6 +185,17 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         var apiTokenKey = OidcSessionStateApiKey.Create(downstreamApiName, requestedScopes);
         for (var attempt = 0; attempt < 5; attempt++)
         {
+            OidcTokenProviderLog.RefreshLockWaiting(logger, downstreamApiName);
+            await using var refreshLock = await refreshLockProvider.AcquireAsync(user, cancellationToken);
+            using var leaseScope = logger.BeginScope(OidcLogScopes.Create(
+                traceIdentifier: Activity.Current?.Id ?? Guid.NewGuid().ToString("n"),
+                providerName: activeProviderOptions.Value.ProviderName,
+                downstreamApiName: downstreamApiName,
+                flowStep: "refresh-lease",
+                leaseOwnerToken: refreshLock.OwnerToken,
+                leaseExpiresAtUtc: refreshLock.ExpiresAtUtc));
+            OidcTokenProviderLog.RefreshLockAcquired(logger, downstreamApiName);
+
             var sessionState = await sessionStateStore.GetSessionStateAsync(user, cancellationToken);
             entry = TryGetApiTokenEntry(sessionState, apiTokenKey);
             refreshRequired = NeedsRefresh(entry, refreshSkew);
@@ -208,10 +220,16 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
                 downstreamApiName,
                 cancellationToken);
 
+            if (timeProvider.GetUtcNow() > refreshLock.ExpiresAtUtc)
+            {
+                OidcTokenProviderLog.RefreshLockLeaseExpired(logger, activeProviderOptions.Value.ProviderName, downstreamApiName);
+                continue;
+            }
+
             var nextState = (sessionState?.State ?? new OidcSessionState()).Clone();
             nextState.SessionTokens = refreshResult.SessionTokenSet;
             nextState.ApiTokens[apiTokenKey] = refreshResult.ApiToken;
-            nextState.LastRefreshUtc = DateTimeOffset.UtcNow;
+            nextState.LastRefreshUtc = timeProvider.GetUtcNow();
 
             if (await sessionStateStore.TryCompareAndSwapSessionStateAsync(
                 user,
@@ -221,6 +239,14 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             {
                 OidcTokenProviderLog.RefreshedTokensStored(logger, activeProviderOptions.Value.ProviderName, downstreamApiName, "success");
                 return refreshResult.ApiToken.AccessToken;
+            }
+
+            var latestState = await sessionStateStore.GetSessionStateAsync(user, cancellationToken);
+            var latestEntry = TryGetApiTokenEntry(latestState, apiTokenKey);
+            if (!NeedsRefresh(latestEntry, refreshSkew))
+            {
+                OidcTokenProviderLog.RefreshedTokensReusedAfterConcurrentUpdate(logger, activeProviderOptions.Value.ProviderName, downstreamApiName);
+                return latestEntry!.AccessToken;
             }
         }
 

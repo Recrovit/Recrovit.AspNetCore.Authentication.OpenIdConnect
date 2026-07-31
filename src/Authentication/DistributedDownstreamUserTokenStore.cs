@@ -11,7 +11,9 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Diagnostics;
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 
 /// <summary>
-/// Distributed cache-backed authenticated session token store that encrypts a versioned session aggregate with ASP.NET Core Data Protection.
+/// Default distributed cache-backed authenticated session token store that encrypts a versioned session aggregate with ASP.NET Core Data Protection.
+/// This implementation is suitable for single-instance deployments unless the host replaces it with a store that provides
+/// cross-node atomic compare-and-swap guarantees.
 /// </summary>
 public sealed class DistributedDownstreamUserTokenStore(
     IDistributedCache distributedCache,
@@ -195,7 +197,20 @@ public sealed class DistributedDownstreamUserTokenStore(
                 ex,
                 nameof(ProtectedSessionStatePayload),
                 ex is CryptographicException ? "data-protection" : "json");
+            await DeleteCorruptedPayloadAsync(cacheKey, cancellationToken);
             return default;
+        }
+    }
+
+    private async Task DeleteCorruptedPayloadAsync(string cacheKey, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await distributedCache.RemoveAsync(cacheKey, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            OidcTokenStoreLog.TokenStorePayloadCleanupFailed(logger, ex, nameof(ProtectedSessionStatePayload));
         }
     }
 

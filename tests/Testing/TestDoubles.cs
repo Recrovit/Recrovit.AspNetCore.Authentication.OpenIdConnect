@@ -308,6 +308,33 @@ internal sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
     public override DateTimeOffset GetUtcNow() => utcNow;
 }
 
+internal sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider
+{
+    private long utcTicks = utcNow.UtcTicks;
+
+    public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref utcTicks), TimeSpan.Zero);
+
+    public void Advance(TimeSpan timeSpan)
+    {
+        Interlocked.Add(ref utcTicks, timeSpan.Ticks);
+    }
+}
+
+internal sealed class FixedLeaseRefreshLockProvider(string ownerToken, DateTimeOffset expiresAtUtc) : IOidcSessionRefreshLockProvider
+{
+    public Task<IOidcSessionRefreshLockLease> AcquireAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+        => Task.FromResult<IOidcSessionRefreshLockLease>(new Lease(ownerToken, expiresAtUtc));
+
+    private sealed class Lease(string ownerToken, DateTimeOffset expiresAtUtc) : IOidcSessionRefreshLockLease
+    {
+        public string OwnerToken { get; } = ownerToken;
+
+        public DateTimeOffset ExpiresAtUtc { get; } = expiresAtUtc;
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+}
+
 internal sealed class RecordingDownstreamHttpProxyClient : IDownstreamHttpProxyClient
 {
     private readonly Func<HttpResponseMessage> responseFactory;

@@ -105,6 +105,21 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     }
 
     [Fact]
+    public async Task GetSessionTokenSetAsync_RemovesPayload_WhenPayloadCannotBeUnprotected()
+    {
+        var distributedCache = new RecordingDistributedCache
+        {
+            StoredValue = "invalid-payload"
+        };
+        var store = CreateStore(distributedCache);
+
+        var entry = await store.GetSessionTokenSetAsync(TestUsers.CreateAuthenticatedUser(), CancellationToken.None);
+
+        Assert.Null(entry);
+        Assert.Equal(1, distributedCache.RemoveAsyncCallCount);
+    }
+
+    [Fact]
     public async Task StoreApiTokenAsync_PreservesExpectedTtlPolicy()
     {
         var distributedCache = new RecordingDistributedCache();
@@ -425,10 +440,13 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     private sealed class RecordingDistributedCache : IDistributedCache
     {
         public List<(string Key, DistributedCacheEntryOptions Options)> Writes { get; } = [];
+        public string? StoredValue { get; set; }
+        public int RemoveAsyncCallCount { get; private set; }
 
         public byte[]? Get(string key) => null;
 
-        public Task<byte[]?> GetAsync(string key, CancellationToken token = default) => Task.FromResult<byte[]?>(null);
+        public Task<byte[]?> GetAsync(string key, CancellationToken token = default)
+            => Task.FromResult(StoredValue is null ? null : Encoding.UTF8.GetBytes(StoredValue));
 
         public void Refresh(string key)
         {
@@ -440,7 +458,12 @@ public sealed class DistributedDownstreamUserTokenStoreTests
         {
         }
 
-        public Task RemoveAsync(string key, CancellationToken token = default) => Task.CompletedTask;
+        public Task RemoveAsync(string key, CancellationToken token = default)
+        {
+            RemoveAsyncCallCount++;
+            StoredValue = null;
+            return Task.CompletedTask;
+        }
 
         public void Set(string key, byte[] value, DistributedCacheEntryOptions options)
         {

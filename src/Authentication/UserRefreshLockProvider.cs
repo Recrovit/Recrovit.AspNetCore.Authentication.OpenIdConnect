@@ -7,7 +7,7 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 internal sealed class UserRefreshLockProvider(
     IOptions<ActiveOidcProviderOptions> activeProviderOptions,
     IOptions<TokenCacheOptions> tokenCacheOptions,
-    TimeProvider timeProvider) : IUserRefreshLockProvider
+    TimeProvider timeProvider) : IOidcSessionRefreshLockProvider
 {
     private readonly object syncRoot = new();
     private readonly Dictionary<string, LockEntry> entries = new(StringComparer.Ordinal);
@@ -15,7 +15,7 @@ internal sealed class UserRefreshLockProvider(
     private readonly TimeProvider timeProvider = timeProvider;
     private readonly TimeSpan leaseDuration = TimeSpan.FromSeconds(tokenCacheOptions.Value.RefreshLockLeaseSeconds);
 
-    public async ValueTask<IUserRefreshLockLease> AcquireAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+    public async Task<IOidcSessionRefreshLockLease> AcquireAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
         var context = cacheKeyContextAccessor.GetRequiredContext(user);
         var userKey = $"{context.Provider}:{context.Issuer}:{context.SubjectId}:{context.SessionId}";
@@ -69,7 +69,7 @@ internal sealed class UserRefreshLockProvider(
         string userKey,
         LockEntry entry,
         string ownerToken,
-        DateTimeOffset expiresAtUtc) : IUserRefreshLockLease
+        DateTimeOffset expiresAtUtc) : IOidcSessionRefreshLockLease
     {
         public string OwnerToken { get; } = ownerToken;
 

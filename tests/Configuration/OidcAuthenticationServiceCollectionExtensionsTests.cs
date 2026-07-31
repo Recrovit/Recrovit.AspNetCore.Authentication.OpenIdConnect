@@ -357,6 +357,20 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesSingleInstanceTokenCacheDeploymentModeByDefault()
+    {
+        var configuration = TestConfiguration.Build();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<TokenCacheOptions>>().Value;
+
+        Assert.Equal(TokenCacheDeploymentMode.SingleInstance, options.DeploymentMode);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_MapsCookieSessionTimeoutPolicy()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
@@ -1137,6 +1151,40 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
 
         Assert.Contains("explicit shared Data Protection key repository", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenMultiInstanceUsesDefaultRefreshLockProvider()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:DeploymentMode"] = "MultiInstance"
+        });
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("default in-process refresh lock provider", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenMultiInstanceUsesDefaultSessionStateStore()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:DeploymentMode"] = "MultiInstance"
+        });
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+        services.Replace(ServiceDescriptor.Singleton<IOidcSessionRefreshLockProvider>(
+            new FixedLeaseRefreshLockProvider("owner", DateTimeOffset.UtcNow.AddMinutes(1))));
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("default distributed token store", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

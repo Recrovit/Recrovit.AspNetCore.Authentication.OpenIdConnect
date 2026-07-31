@@ -264,6 +264,7 @@ Key responsibilities:
 
 - cache key prefix for encrypted stored user tokens
 - shared HMAC secret for deriving non-reversible session cache identifiers from provider, issuer, subject, and local session metadata
+- deployment mode, which declares whether refresh coordination is expected to remain single-instance or span multiple nodes
 - refresh skew, which controls how early token refresh starts before access token expiration
 - refresh lock lease duration for session-scoped refresh coordination
 
@@ -697,6 +698,8 @@ Refresh persistence is modeled as a versioned compare-and-swap update of the com
 
 Cache keys no longer contain raw issuer, subject, or session identifiers. The package derives a stable HMAC-based session fingerprint from that metadata and uses it as the external cache key segment instead.
 
+The built-in `DistributedDownstreamUserTokenStore` and `UserRefreshLockProvider` are intended as safe defaults for development and single-instance hosts. They do not by themselves provide production-safe cross-node compare-and-swap or cross-node refresh lease guarantees.
+
 ## Session Validation
 
 The `session` and `principal` endpoints use `OidcAuthenticationOptions.SessionValidationDownstreamApiName` when configured.
@@ -800,7 +803,10 @@ In production:
 - an explicit shared Data Protection key repository is required
 - `HostSecurityOptions.DataProtectionKeysPath` remains supported as a backward-compatible way to configure that repository
 - `TokenCacheOptions.CacheKeyHmacSecret` must be shared across all instances
-- multi-instance deployments should replace the default session refresh lock/store implementations with shared implementations that can coordinate versioned session-state updates across nodes
+- `TokenCacheOptions.DeploymentMode` defaults to `SingleInstance`
+- when `TokenCacheOptions.DeploymentMode` is set to `MultiInstance`, the host must replace both `IOidcSessionRefreshLockProvider` and `IOidcSessionStateStore`
+- the replacement refresh lock provider must coordinate one authenticated session across nodes for the whole lease duration
+- the replacement session state store must provide atomic cross-node compare-and-swap semantics for the full session aggregate
 
 When `DataProtectionSecurityProfile` is set to `Hardened`, production startup also requires:
 
@@ -808,6 +814,8 @@ When `DataProtectionSecurityProfile` is set to `Hardened`, production startup al
 - explicit key-ring encryption when the key repository is configured explicitly
 
 `AddRecrovitOpenIdConnectInfrastructure()` registers `AddDistributedMemoryCache()` as a safe default for development and simple single-instance runs. Production hosts should replace that default with a shared `IDistributedCache` backend so encrypted token-cache entries remain available across restarts and across multiple application instances.
+
+If `DeploymentMode` is explicitly set to `MultiInstance` while the default single-node refresh lock or the default distributed token store is still registered, startup fails fast with a configuration error.
 
 The package validates that the effective sign-in scope set is not empty and that each configured downstream API declares a non-empty scope list.
 
