@@ -40,10 +40,14 @@ internal static class DownstreamProxyUtilities
         return $"{normalizedPrefix}/{normalizedPathAndQuery}";
     }
 
+    public static void ValidateDownstreamPath(DownstreamApiDefinition downstreamApi, string pathAndQuery)
+    {
+        _ = CreateValidatedDownstreamUri(downstreamApi, pathAndQuery);
+    }
+
     public static Uri CreateDownstreamUri(DownstreamApiDefinition downstreamApi, string pathAndQuery, bool useWebSocketScheme = false)
     {
-        var baseUri = new Uri(downstreamApi.BaseUrl, UriKind.Absolute);
-        var resolvedUri = new Uri(baseUri, BuildPathAndQuery(downstreamApi.RelativePath, pathAndQuery));
+        var resolvedUri = CreateValidatedDownstreamUri(downstreamApi, pathAndQuery);
         if (!useWebSocketScheme)
         {
             return resolvedUri;
@@ -182,5 +186,79 @@ internal static class DownstreamProxyUtilities
         }
 
         return builder.ToString();
+    }
+
+    private static Uri CreateValidatedDownstreamUri(DownstreamApiDefinition downstreamApi, string pathAndQuery)
+    {
+        ValidateIncomingPath(pathAndQuery);
+
+        var baseUri = new Uri(downstreamApi.BaseUrl, UriKind.Absolute);
+        var resolvedUri = new Uri(baseUri, BuildPathAndQuery(downstreamApi.RelativePath, pathAndQuery));
+
+        if (!HasMatchingOrigin(baseUri, resolvedUri))
+        {
+            throw new InvalidDownstreamProxyPathException("The downstream proxy path resolved outside the configured downstream origin.");
+        }
+
+        return resolvedUri;
+    }
+
+    private static void ValidateIncomingPath(string pathAndQuery)
+    {
+        var path = GetPathPart(pathAndQuery);
+        if (path.Length >= 2 && IsSlashOrBackslash(path[0]) && IsSlashOrBackslash(path[1]))
+        {
+            throw new InvalidDownstreamProxyPathException("The downstream proxy path must not use an authority-like prefix.");
+        }
+
+        var trimmedPath = path.TrimStart('/').ToString();
+        if (StartsWithEncodedAuthorityPrefix(trimmedPath))
+        {
+            throw new InvalidDownstreamProxyPathException("The downstream proxy path must not use an authority-like prefix.");
+        }
+
+        if (Uri.TryCreate(trimmedPath, UriKind.Absolute, out _))
+        {
+            throw new InvalidDownstreamProxyPathException("The downstream proxy path must not be an absolute URI.");
+        }
+    }
+
+    private static ReadOnlySpan<char> GetPathPart(string pathAndQuery)
+    {
+        var queryIndex = pathAndQuery.IndexOf('?');
+        return queryIndex >= 0
+            ? pathAndQuery.AsSpan(0, queryIndex)
+            : pathAndQuery.AsSpan();
+    }
+
+    private static bool HasMatchingOrigin(Uri expectedOrigin, Uri actualUri)
+    {
+        return string.Equals(expectedOrigin.Scheme, actualUri.Scheme, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(expectedOrigin.Host, actualUri.Host, StringComparison.OrdinalIgnoreCase)
+            && GetEffectivePort(expectedOrigin) == GetEffectivePort(actualUri);
+    }
+
+    private static int GetEffectivePort(Uri uri)
+    {
+        if (!uri.IsDefaultPort)
+        {
+            return uri.Port;
+        }
+
+        return uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            ? 443
+            : uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                ? 80
+                : uri.Port;
+    }
+
+    private static bool IsSlashOrBackslash(char value) => value is '/' or '\\';
+
+    private static bool StartsWithEncodedAuthorityPrefix(string value)
+    {
+        return value.StartsWith("%2f%2f", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("%2f%5c", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("%5c%2f", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("%5c%5c", StringComparison.OrdinalIgnoreCase);
     }
 }

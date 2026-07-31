@@ -11,11 +11,21 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Allowed provider-specific downstream API entries to override base URL and relative path values, and to replace the shared scope list when a provider-specific `Scopes` section is present.
   - Added `Disabled` support on downstream API definitions so shared or provider-specific entries can be removed from the effective catalog.
 
+### Bugs Fixed
+
+- Downstream proxy URI hardening
+  - Rejected absolute, scheme-relative, and backslash-authority proxy path inputs before any outbound downstream request is created.
+  - Enforced exact downstream origin matching for resolved proxy targets so outbound scheme, host, and port remain pinned to the configured downstream API base URL.
+  - Returned `400 Bad Request` for invalid downstream proxy paths in both HTTP and transport/WebSocket proxy flows instead of attempting outbound dispatch.
+
 ### Other Changes
 
 - Downstream API configuration coverage
   - Added tests covering provider-specific downstream API overrides and disabling behavior.
   - Expanded configuration documentation for provider-level downstream API customization and disabling.
+- Proxy regression coverage
+  - Added proxy tests for valid relative path handling, origin preservation, empty-path behavior, and rejection of unsafe proxy path forms.
+
 
 ## [10.1.0] - 2026-07-10
 

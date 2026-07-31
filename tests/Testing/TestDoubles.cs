@@ -181,8 +181,22 @@ internal sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
     public override DateTimeOffset GetUtcNow() => utcNow;
 }
 
-internal sealed class RecordingDownstreamHttpProxyClient(HttpResponseMessage response) : IDownstreamHttpProxyClient
+internal sealed class RecordingDownstreamHttpProxyClient : IDownstreamHttpProxyClient
 {
+    private readonly Func<HttpResponseMessage> responseFactory;
+
+    public RecordingDownstreamHttpProxyClient(HttpResponseMessage response)
+        : this(() => response)
+    {
+    }
+
+    public RecordingDownstreamHttpProxyClient(Func<HttpResponseMessage> responseFactory)
+    {
+        this.responseFactory = responseFactory;
+    }
+
+    public int CallCount { get; private set; }
+
     public string? DownstreamApiName { get; private set; }
 
     public HttpMethod? Method { get; private set; }
@@ -206,6 +220,7 @@ internal sealed class RecordingDownstreamHttpProxyClient(HttpResponseMessage res
         IEnumerable<KeyValuePair<string, StringValues>> headers,
         CancellationToken cancellationToken)
     {
+        CallCount++;
         DownstreamApiName = downstreamApiName;
         Method = method;
         PathAndQuery = pathAndQuery;
@@ -215,7 +230,32 @@ internal sealed class RecordingDownstreamHttpProxyClient(HttpResponseMessage res
         ContentBody = content is null
             ? null
             : await content.ReadAsStringAsync(cancellationToken);
-        return response;
+        return responseFactory();
+    }
+}
+
+internal sealed class RecordingDownstreamTransportProxyClient : IDownstreamTransportProxyClient
+{
+    public int CallCount { get; private set; }
+
+    public string? DownstreamApiName { get; private set; }
+
+    public string? PathAndQuery { get; private set; }
+
+    public ClaimsPrincipal? User { get; private set; }
+
+    public Task ProxyWebSocketAsync(
+        HttpContext context,
+        string downstreamApiName,
+        string pathAndQuery,
+        ClaimsPrincipal? user,
+        CancellationToken cancellationToken)
+    {
+        CallCount++;
+        DownstreamApiName = downstreamApiName;
+        PathAndQuery = pathAndQuery;
+        User = user;
+        return Task.CompletedTask;
     }
 }
 

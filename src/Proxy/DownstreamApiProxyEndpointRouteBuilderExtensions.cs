@@ -52,22 +52,32 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
         }
 
         var pathAndQuery = BuildPathAndQuery(path, context.Request.QueryString);
+        var downstreamApi = downstreamApiCatalog.GetRequired(apiName);
 
-        if (context.WebSockets.IsWebSocketRequest)
+        try
         {
-            await transportProxyClient.ProxyWebSocketAsync(context, apiName, pathAndQuery, context.User, cancellationToken);
+            DownstreamProxyUtilities.ValidateDownstreamPath(downstreamApi, pathAndQuery);
+
+            if (context.WebSockets.IsWebSocketRequest)
+            {
+                await transportProxyClient.ProxyWebSocketAsync(context, apiName, pathAndQuery, context.User, cancellationToken);
+                return Results.Empty;
+            }
+
+            await DownstreamProxyEndpointExecutor.ProxyHttpAsync(
+                context,
+                httpProxyClient,
+                apiName,
+                pathAndQuery,
+                context.User,
+                cancellationToken);
+
             return Results.Empty;
         }
-
-        await DownstreamProxyEndpointExecutor.ProxyHttpAsync(
-            context,
-            httpProxyClient,
-            apiName,
-            pathAndQuery,
-            context.User,
-            cancellationToken);
-
-        return Results.Empty;
+        catch (InvalidDownstreamProxyPathException)
+        {
+            return Results.BadRequest();
+        }
     }
 
     private static string NormalizeRoutePrefix(string routePrefix)

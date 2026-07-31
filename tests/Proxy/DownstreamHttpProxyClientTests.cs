@@ -29,6 +29,18 @@ public sealed class DownstreamHttpProxyClientTests
         Assert.Equal("Bearer", captureHandler.LastRequest!.Headers.Authorization!.Scheme);
         Assert.Equal("access-token", captureHandler.LastRequest.Headers.Authorization.Parameter);
         Assert.Equal("https://api.example.com/gateway/session/check?id=5", captureHandler.LastRequest.RequestUri!.ToString());
+
+        using var emptyPathResponse = await client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            string.Empty,
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None);
+
+        Assert.Equal(HttpStatusCode.OK, emptyPathResponse.StatusCode);
+        Assert.Equal("https://api.example.com/gateway", captureHandler.LastRequest.RequestUri!.ToString());
     }
 
     [Fact]
@@ -153,5 +165,45 @@ public sealed class DownstreamHttpProxyClientTests
         var error = Assert.Single(logger.Entries, static entry => entry.Level == LogLevel.Error);
         Assert.Contains("failed", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret-code", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SendAsync_RejectsAbsoluteAndAuthorityLikeProxyPaths()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(httpClient, new StubDownstreamUserTokenProvider());
+
+        var absoluteException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/https://attacker.example/collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+        Assert.Contains("absolute URI", absoluteException.Message, StringComparison.OrdinalIgnoreCase);
+
+        var schemeRelativeException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "//attacker.example/collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+        Assert.Contains("authority-like", schemeRelativeException.Message, StringComparison.OrdinalIgnoreCase);
+
+        var backslashException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "\\\\attacker.example\\collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+        Assert.Contains("authority-like", backslashException.Message, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Null(captureHandler.LastRequest);
     }
 }
