@@ -67,11 +67,11 @@ public sealed class DownstreamHttpProxyClientTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Null(captureHandler.LastRequest!.Headers.Authorization);
         Assert.True(captureHandler.LastRequest.Headers.Contains("Accept-Language"));
-        Assert.False(captureHandler.LastRequest.Headers.Contains("Cookie"));
+        Assert.True(captureHandler.LastRequest.Headers.Contains("Cookie"));
     }
 
     [Fact]
-    public async Task SendAsync_ForwardsOnlyAllowlistedHeaders()
+    public async Task SendAsync_ForwardsProvidedHeaders_WhenCallerSuppliesPreparedSet()
     {
         var captureHandler = new CaptureRequestHandler();
         using var httpClient = new HttpClient(captureHandler);
@@ -106,15 +106,15 @@ public sealed class DownstreamHttpProxyClientTests
         Assert.True(request.Headers.Contains("Accept-Language"));
         Assert.True(request.Headers.Contains("If-None-Match"));
         Assert.True(request.Headers.Contains("RgF-Trace-Id"));
-
-        Assert.Null(request.Headers.Authorization);
-        Assert.False(request.Headers.Contains("Cookie"));
-        Assert.False(request.Headers.Contains("Connection"));
-        Assert.False(request.Headers.Contains("X-Forwarded-For"));
-        Assert.Null(request.Headers.Host);
+        Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+        Assert.Equal("should-not-forward", request.Headers.Authorization?.Parameter);
+        Assert.True(request.Headers.Contains("Cookie"));
+        Assert.True(request.Headers.Contains("Connection"));
+        Assert.True(request.Headers.Contains("X-Forwarded-For"));
+        Assert.Equal("malicious.example", request.Headers.Host);
 
         Assert.Equal(
-            ["Accept", "Accept-Language", "If-None-Match", "RgF-Trace-Id"],
+            ["Accept", "Accept-Language", "Authorization", "Connection", "Cookie", "Host", "If-None-Match", "RgF-Trace-Id", "X-Forwarded-For"],
             forwardedInputHeaders.OrderBy(static header => header, StringComparer.OrdinalIgnoreCase));
     }
 

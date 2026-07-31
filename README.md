@@ -140,6 +140,8 @@ Each downstream API definition describes:
 
 - `BaseUrl`
 - `Scopes`
+- `ForwardedRequestHeaders`
+- `ForwardedResponseHeaders`
 - `RelativePath`
 
 The catalog is used both for validation and for runtime token access.
@@ -153,11 +155,21 @@ Precedence rules:
 - the shared `DownstreamApis` section provides the base definition
 - provider-specific entries override only the fields they define
 - provider-specific `Scopes` replaces the shared scope list when the section is present
+- provider-specific `ForwardedRequestHeaders` and `ForwardedResponseHeaders` replace the shared list when the section is present
 - `Disabled: true` removes the downstream API from the effective catalog entirely
 
 Each downstream API definition also supports:
 
 - `Disabled`
+
+Header forwarding defaults:
+
+- the proxy forwards these request headers by default: `Accept`, `Accept-Language`, `If-None-Match`, `If-Modified-Since`
+- `IncludeDefaultForwardedRequestHeaders` defaults to `true`
+- set `IncludeDefaultForwardedRequestHeaders: false` to opt out per API
+- there is no wildcard forwarding; the previous client-controlled `rgf-*` pattern is not supported
+- request headers such as `Authorization`, `Proxy-Authorization`, `Cookie`, `Host`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Content-Length`, hop-by-hop headers, and `Connection`-declared headers are never forwarded even if configured
+- `ForwardedResponseHeaders` extends a built-in safe response allowlist; host-owned CORS and security headers are always suppressed
 
 ## Downstream API Proxy Endpoints
 
@@ -169,6 +181,20 @@ Register the endpoints with:
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 
 app.MapDownstreamApiProxyEndpoints();
+```
+
+Hosts can also configure immutable per-API claim-header mappings when the endpoints are mapped:
+
+```csharp
+using System.Security.Claims;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
+
+app.MapDownstreamApiProxyEndpoints(options =>
+{
+    options.ForApi("UserInfoApi")
+        .ForwardFirstClaimHeader("X-User-Id", ClaimTypes.NameIdentifier, "sub")
+        .ForwardClaimValuesHeader("X-User-Roles", ClaimTypes.Role);
+});
 ```
 
 This maps a generic route pattern:
@@ -185,6 +211,10 @@ Behavior:
 - the route path after `/downstream/{apiName}` is appended only within that configured downstream root; attempts to escape it are rejected with `400 Bad Request`
 - the host acquires or refreshes the signed-in user's downstream access token through `IDownstreamUserTokenProvider`
 - the request is forwarded through the built-in downstream HTTP proxy infrastructure
+- the typed downstream proxy `HttpClient` does not auto-follow redirects and does not store downstream cookies
+- request headers are forwarded from the built-in default request-header set, plus any extra names listed in the matched API definition's `ForwardedRequestHeaders`
+- server-generated claim headers remove any same-named client value before the authenticated user's claim-derived value is applied
+- downstream `Location` headers are rewritten back to the public proxy route only when the redirect target stays on the configured downstream origin and under the configured downstream root
 - cookie-authenticated downstream proxy requests are protected against cross-site browser initiation by default, and unsafe methods also require antiforgery validation
 - API-style authorization behavior is preserved, so unauthorized proxy requests return `401` or `403` instead of redirecting to login
 
@@ -200,6 +230,9 @@ Example:
         "UserInfoApi": {
           "BaseUrl": "https://graph.microsoft.com/",
           "Scopes": [ "openid", "profile", "email", "User.Read" ],
+          "IncludeDefaultForwardedRequestHeaders": true,
+          "ForwardedRequestHeaders": [ "Accept", "If-None-Match" ],
+          "ForwardedResponseHeaders": [ "X-Trace-Id" ],
           "RelativePath": "oidc/userinfo"
         }
       }

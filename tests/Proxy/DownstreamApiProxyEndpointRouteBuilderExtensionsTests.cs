@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -57,6 +58,284 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         Assert.Equal("?expand=roles", proxyClient.PathAndQuery);
         Assert.Equal(2, proxyClient.CallCount);
         Assert.Equal(0, transportProxyClient.CallCount);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_UsesEmptyRequestAllowlistByDefault()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient);
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+        client.DefaultRequestHeaders.Add("Accept", "application/json");
+        client.DefaultRequestHeaders.Add("Accept-Language", "hu-HU");
+        client.DefaultRequestHeaders.Add("RgF-Trace-Id", "trace-123");
+
+        using var response = await client.GetAsync("/downstream/GraphApi/me", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var forwardedHeaders = proxyClient.Headers.ToDictionary(static header => header.Key, static header => header.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(new[] { "application/json" }, forwardedHeaders["Accept"]);
+        Assert.Equal(new[] { "hu-HU" }, forwardedHeaders["Accept-Language"]);
+        Assert.False(forwardedHeaders.ContainsKey("RgF-Trace-Id"));
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ForwardsConfiguredRequestHeaders_AndOverridesSpoofedClaimHeaders()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var user = TestUsers.CreateAuthenticatedUser(
+        [
+            new Claim(ClaimTypes.NameIdentifier, "user-123"),
+            new Claim(ClaimTypes.Role, "admin"),
+            new Claim(ClaimTypes.Role, "admin"),
+            new Claim(ClaimTypes.Role, "auditor"),
+            new Claim("tenant_id", "tenant-42")
+        ]);
+        var catalog = new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com",
+                Scopes = ["openid"]
+            },
+            ["GraphApi"] = new()
+            {
+                BaseUrl = "https://graph.example.com",
+                Scopes = ["graph.read"],
+                ForwardedRequestHeaders = ["Accept", "X-Client-Request-Id", "X-User-Id"]
+            }
+        });
+
+        await using var app = await CreateApplicationAsync(
+            proxyClient,
+            downstreamApiCatalog: catalog,
+            user: user,
+            configureEndpoints: options => options.ForApi("GraphApi")
+                .ForwardFirstClaimHeader("X-User-Id", ClaimTypes.NameIdentifier, "tenant_id")
+                .ForwardClaimValuesHeader("X-User-Roles", ClaimTypes.Role));
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/downstream/GraphApi/me");
+        request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+        request.Headers.TryAddWithoutValidation("Accept", "application/json");
+        request.Headers.TryAddWithoutValidation("X-Client-Request-Id", "request-7");
+        request.Headers.TryAddWithoutValidation("X-User-Id", "spoofed");
+        request.Headers.TryAddWithoutValidation("X-User-Roles", "spoofed-role");
+        request.Headers.TryAddWithoutValidation("RgF-Trace-Id", "trace-123");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var forwardedHeaders = proxyClient.Headers.ToDictionary(static header => header.Key, static header => header.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(new[] { "application/json" }, forwardedHeaders["Accept"]);
+        Assert.Equal(new[] { "request-7" }, forwardedHeaders["X-Client-Request-Id"]);
+        Assert.Equal(new[] { "user-123" }, forwardedHeaders["X-User-Id"]);
+        Assert.Equal(new[] { "admin", "auditor" }, forwardedHeaders["X-User-Roles"]);
+        Assert.False(forwardedHeaders.ContainsKey("RgF-Trace-Id"));
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ForwardsConfiguredHeaders_InAdditionToDefaults()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var catalog = new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com",
+                Scopes = ["openid"]
+            },
+            ["GraphApi"] = new()
+            {
+                BaseUrl = "https://graph.example.com",
+                Scopes = ["graph.read"],
+                ForwardedRequestHeaders = ["X-Client-Request-Id"]
+            }
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient, downstreamApiCatalog: catalog);
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/downstream/GraphApi/me");
+        request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+        request.Headers.TryAddWithoutValidation("Accept", "application/json");
+        request.Headers.TryAddWithoutValidation("Accept-Language", "hu-HU");
+        request.Headers.TryAddWithoutValidation("If-None-Match", "\"etag-1\"");
+        request.Headers.TryAddWithoutValidation("If-Modified-Since", "Wed, 21 Oct 2015 07:28:00 GMT");
+        request.Headers.TryAddWithoutValidation("X-Client-Request-Id", "request-7");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var forwardedHeaders = proxyClient.Headers.ToDictionary(static header => header.Key, static header => header.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(new[] { "application/json" }, forwardedHeaders["Accept"]);
+        Assert.Equal(new[] { "hu-HU" }, forwardedHeaders["Accept-Language"]);
+        Assert.Equal(new[] { "\"etag-1\"" }, forwardedHeaders["If-None-Match"]);
+        Assert.Equal(new[] { "Wed, 21 Oct 2015 07:28:00 GMT" }, forwardedHeaders["If-Modified-Since"]);
+        Assert.Equal(new[] { "request-7" }, forwardedHeaders["X-Client-Request-Id"]);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_OnlyForwardsExplicitHeaders_WhenDefaultRequestHeadersAreDisabled()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var catalog = new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com",
+                Scopes = ["openid"]
+            },
+            ["GraphApi"] = new()
+            {
+                BaseUrl = "https://graph.example.com",
+                Scopes = ["graph.read"],
+                IncludeDefaultForwardedRequestHeaders = false,
+                ForwardedRequestHeaders = ["X-Client-Request-Id"]
+            }
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient, downstreamApiCatalog: catalog);
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/downstream/GraphApi/me");
+        request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+        request.Headers.TryAddWithoutValidation("Accept", "application/json");
+        request.Headers.TryAddWithoutValidation("Accept-Language", "hu-HU");
+        request.Headers.TryAddWithoutValidation("If-None-Match", "\"etag-1\"");
+        request.Headers.TryAddWithoutValidation("If-Modified-Since", "Wed, 21 Oct 2015 07:28:00 GMT");
+        request.Headers.TryAddWithoutValidation("X-Client-Request-Id", "request-7");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var forwardedHeaders = proxyClient.Headers.ToDictionary(static header => header.Key, static header => header.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(new[] { "request-7" }, forwardedHeaders["X-Client-Request-Id"]);
+        Assert.False(forwardedHeaders.ContainsKey("Accept"));
+        Assert.False(forwardedHeaders.ContainsKey("Accept-Language"));
+        Assert.False(forwardedHeaders.ContainsKey("If-None-Match"));
+        Assert.False(forwardedHeaders.ContainsKey("If-Modified-Since"));
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ForwardsNoRequestHeaders_WhenDefaultsDisabled_AndNoExplicitHeadersConfigured()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var catalog = new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com",
+                Scopes = ["openid"]
+            },
+            ["GraphApi"] = new()
+            {
+                BaseUrl = "https://graph.example.com",
+                Scopes = ["graph.read"],
+                IncludeDefaultForwardedRequestHeaders = false
+            }
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient, downstreamApiCatalog: catalog);
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/downstream/GraphApi/me");
+        request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+        request.Headers.TryAddWithoutValidation("Accept", "application/json");
+        request.Headers.TryAddWithoutValidation("Accept-Language", "hu-HU");
+        request.Headers.TryAddWithoutValidation("If-None-Match", "\"etag-1\"");
+        request.Headers.TryAddWithoutValidation("If-Modified-Since", "Wed, 21 Oct 2015 07:28:00 GMT");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Empty(proxyClient.Headers);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_RewritesSameOriginLocation_AndFiltersBlockedResponseHeaders()
+    {
+        var downstreamResponse = new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Content = new StringContent(string.Empty)
+        };
+        downstreamResponse.Headers.Location = new Uri("https://graph.example.com/root/gateway/reports/next?cursor=2");
+        downstreamResponse.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoStore = true };
+        downstreamResponse.Headers.TryAddWithoutValidation("X-Trace-Id", "trace-123");
+        downstreamResponse.Headers.TryAddWithoutValidation("Set-Cookie", "blocked=true");
+        downstreamResponse.Headers.TryAddWithoutValidation("Access-Control-Allow-Origin", "*");
+        downstreamResponse.Headers.TryAddWithoutValidation("Strict-Transport-Security", "max-age=100");
+        downstreamResponse.Headers.TryAddWithoutValidation("Refresh", "0;url=https://attacker.example");
+        var proxyClient = new RecordingDownstreamHttpProxyClient(downstreamResponse);
+        var catalog = new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com",
+                Scopes = ["openid"]
+            },
+            ["GraphApi"] = new()
+            {
+                BaseUrl = "https://graph.example.com/root",
+                RelativePath = "gateway",
+                Scopes = ["graph.read"],
+                ForwardedResponseHeaders = ["X-Trace-Id"]
+            }
+        });
+
+        await using var app = await CreateApplicationAsync(
+            proxyClient,
+            downstreamApiCatalog: catalog,
+            routePrefix: "/proxy");
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await client.GetAsync("/proxy/GraphApi/reports", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Found, response.StatusCode);
+        Assert.Equal("/proxy/GraphApi/reports/next?cursor=2", response.Headers.Location?.OriginalString);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Equal(["trace-123"], response.Headers.GetValues("X-Trace-Id"));
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+        Assert.False(response.Headers.Contains("Access-Control-Allow-Origin"));
+        Assert.False(response.Headers.Contains("Strict-Transport-Security"));
+        Assert.False(response.Headers.Contains("Refresh"));
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_DropsExternalLocation_WithoutChangingStatusCode()
+    {
+        var downstreamResponse = new HttpResponseMessage(HttpStatusCode.TemporaryRedirect)
+        {
+            Content = new StringContent(string.Empty)
+        };
+        downstreamResponse.Headers.Location = new Uri("https://attacker.example/collect");
+        var proxyClient = new RecordingDownstreamHttpProxyClient(downstreamResponse);
+
+        await using var app = await CreateApplicationAsync(proxyClient);
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await client.GetAsync("/downstream/GraphApi/me", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.TemporaryRedirect, response.StatusCode);
+        Assert.Null(response.Headers.Location);
     }
 
     [Theory]
@@ -605,13 +884,48 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ThrowsForUnknownConfiguredClaimHeaderApi()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateApplicationAsync(
+            proxyClient,
+            configureEndpoints: options => options.ForApi("UnknownApi")
+                .ForwardFirstClaimHeader("X-User-Id", ClaimTypes.NameIdentifier)));
+
+        Assert.Contains("UnknownApi", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ThrowsForForbiddenClaimHeaderName()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateApplicationAsync(
+            proxyClient,
+            configureEndpoints: options => options.ForApi("GraphApi")
+                .ForwardFirstClaimHeader("Authorization", ClaimTypes.NameIdentifier)));
+
+        Assert.Contains("Authorization", ex.Message, StringComparison.Ordinal);
+    }
+
     private static async Task<WebApplication> CreateApplicationAsync(
         IDownstreamHttpProxyClient proxyClient,
         IDownstreamTransportProxyClient? transportProxyClient = null,
         DownstreamProxyRequestProtectionOptions? protectionOptions = null,
         DownstreamApiCatalog? downstreamApiCatalog = null,
         IAntiforgery? antiforgery = null,
-        IAntiforgeryValidationFeature? antiforgeryFeature = null)
+        IAntiforgeryValidationFeature? antiforgeryFeature = null,
+        Action<DownstreamProxyEndpointOptions>? configureEndpoints = null,
+        string routePrefix = DownstreamApiProxyEndpointRouteBuilderExtensions.DefaultRoutePrefix,
+        ClaimsPrincipal? user = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -657,9 +971,9 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         builder.Services.Replace(ServiceDescriptor.Singleton<IDownstreamTransportProxyClient>(transportProxyClient ?? new NoOpDownstreamTransportProxyClient()));
 
         var app = builder.Build();
-        app.Use(static (context, next) =>
+        app.Use((context, next) =>
         {
-            context.User = TestUsers.CreateAuthenticatedUser();
+            context.User = user ?? TestUsers.CreateAuthenticatedUser();
             return next(context);
         });
         app.Use(async (context, next) =>
@@ -682,7 +996,14 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
 
             await next(context);
         });
-        app.MapDownstreamApiProxyEndpoints();
+        if (configureEndpoints is null)
+        {
+            app.MapDownstreamApiProxyEndpoints(routePrefix);
+        }
+        else
+        {
+            app.MapDownstreamApiProxyEndpoints(configureEndpoints, routePrefix);
+        }
 
         await app.StartAsync(TestContext.Current.CancellationToken);
         return app;

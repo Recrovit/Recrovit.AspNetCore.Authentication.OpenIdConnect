@@ -1,6 +1,6 @@
-using Microsoft.Extensions.Primitives;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+using Microsoft.Extensions.Primitives;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
 using System.Security.Claims;
@@ -10,19 +10,6 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 
 internal static class DownstreamProxyUtilities
 {
-    /// <summary>
-    /// The only standard request headers forwarded by the downstream proxy.
-    /// Headers outside this allowlist, such as <c>Host</c>, <c>Cookie</c>, and other sensitive headers,
-    /// are intentionally excluded unless they use the <c>rgf-</c> prefix.
-    /// </summary>
-    private static readonly HashSet<string> ForwardedHeaderNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Accept",
-        "Accept-Language",
-        "If-None-Match",
-        "If-Modified-Since"
-    };
-
     public static string BuildPathAndQuery(string? prefix, string pathAndQuery)
     {
         var normalizedPathAndQuery = pathAndQuery.TrimStart('/');
@@ -105,18 +92,13 @@ internal static class DownstreamProxyUtilities
         return await tokenProvider.GetAccessTokenAsync(user, downstreamApiName, cancellationToken);
     }
 
-    public static void ForwardHeaders(
+    public static void AddHeaders(
         IEnumerable<KeyValuePair<string, StringValues>> headers,
         HttpRequestHeaders requestHeaders,
         HttpContentHeaders? contentHeaders)
     {
         foreach (var header in headers)
         {
-            if (!ShouldForwardHeader(header.Key))
-            {
-                continue;
-            }
-
             if (!requestHeaders.TryAddWithoutValidation(header.Key, header.Value.ToArray()))
             {
                 contentHeaders?.TryAddWithoutValidation(header.Key, header.Value.ToArray());
@@ -124,31 +106,14 @@ internal static class DownstreamProxyUtilities
         }
     }
 
-    public static void ForwardHeaders(
+    public static void AddHeaders(
         IEnumerable<KeyValuePair<string, StringValues>> headers,
         ClientWebSocketOptions options)
     {
         foreach (var header in headers)
         {
-            if (ShouldForwardHeader(header.Key))
-            {
-                options.SetRequestHeader(header.Key, string.Join(",", header.Value.ToArray()));
-            }
+            options.SetRequestHeader(header.Key, string.Join(",", header.Value.ToArray()));
         }
-    }
-
-    /// <summary>
-    /// Determines whether a request header may be forwarded to a downstream API.
-    /// Only the explicit allowlist and custom <c>rgf-*</c> headers are forwarded.
-    /// </summary>
-    public static bool ShouldForwardHeader(string headerName)
-    {
-        if (ForwardedHeaderNames.Contains(headerName))
-        {
-            return true;
-        }
-
-        return headerName.StartsWith("rgf-", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string MaskQueryValues(string query)
@@ -270,7 +235,7 @@ internal static class DownstreamProxyUtilities
         return pathAndQuery[(queryIndex + 1)..];
     }
 
-    private static bool HasMatchingOrigin(Uri expectedOrigin, Uri actualUri)
+    public static bool HasMatchingOrigin(Uri expectedOrigin, Uri actualUri)
     {
         return string.Equals(expectedOrigin.Scheme, actualUri.Scheme, StringComparison.OrdinalIgnoreCase)
             && string.Equals(expectedOrigin.Host, actualUri.Host, StringComparison.OrdinalIgnoreCase)
@@ -290,7 +255,7 @@ internal static class DownstreamProxyUtilities
         }
     }
 
-    private static bool IsUnderConfiguredRoot(Uri baseUri, string? relativePath, Uri resolvedUri)
+    public static bool IsUnderConfiguredRoot(Uri baseUri, string? relativePath, Uri resolvedUri)
     {
         var configuredRootPath = BuildConfiguredRootPath(baseUri.AbsolutePath, relativePath);
         var resolvedPath = NormalizePathForComparison(resolvedUri.AbsolutePath);
@@ -311,7 +276,7 @@ internal static class DownstreamProxyUtilities
         return builder.Uri;
     }
 
-    private static string BuildConfiguredRootPath(string basePath, string? relativePath)
+    public static string BuildConfiguredRootPath(string basePath, string? relativePath)
     {
         return NormalizePathForComparison(BuildCombinedAbsolutePath(basePath, relativePath, string.Empty));
     }
@@ -334,7 +299,7 @@ internal static class DownstreamProxyUtilities
         return string.IsNullOrEmpty(combinedPath) ? "/" : "/" + combinedPath;
     }
 
-    private static string NormalizePathForComparison(string path)
+    public static string NormalizePathForComparison(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || string.Equals(path, "/", StringComparison.Ordinal))
         {

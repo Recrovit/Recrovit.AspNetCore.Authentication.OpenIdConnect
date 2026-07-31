@@ -36,6 +36,14 @@ public sealed class DownstreamTransportProxyClient(
         var downstreamUri = DownstreamProxyUtilities.CreateDownstreamUri(downstreamApi, pathAndQuery, useWebSocketScheme: true);
         var downstreamLogValue = DownstreamProxyUtilities.FormatDownstreamUriForLogging(downstreamUri);
         var accessToken = await DownstreamProxyUtilities.TryGetAccessTokenAsync(tokenProvider, user, downstreamApiName, cancellationToken);
+        var endpointMetadata = context.GetEndpoint()?.Metadata.GetMetadata<DownstreamProxyEndpointMetadata>();
+        var apiMetadata = endpointMetadata?.GetApiMetadata(downstreamApiName) ?? DownstreamProxyEndpointApiMetadata.Empty;
+        var forwardedHeaders = DownstreamProxyHeaderPolicy.CreateForwardedRequestHeaders(
+            downstreamApi,
+            context.Request.Headers,
+            user,
+            apiMetadata.ClaimHeaderMappings,
+            logger);
 
         using var downstreamSocket = new ClientWebSocket();
         foreach (var subProtocol in context.WebSockets.WebSocketRequestedProtocols)
@@ -43,7 +51,7 @@ public sealed class DownstreamTransportProxyClient(
             downstreamSocket.Options.AddSubProtocol(subProtocol);
         }
 
-        DownstreamProxyUtilities.ForwardHeaders(context.Request.Headers, downstreamSocket.Options);
+        DownstreamProxyUtilities.AddHeaders(forwardedHeaders, downstreamSocket.Options);
 
         if (!string.IsNullOrWhiteSpace(accessToken))
         {

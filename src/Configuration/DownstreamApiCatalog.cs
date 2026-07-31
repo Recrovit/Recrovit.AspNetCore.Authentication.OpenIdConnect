@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using Microsoft.Extensions.Configuration;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 
@@ -89,6 +90,20 @@ public sealed class DownstreamApiCatalog
                 throw new InvalidOperationException($"{sourcePath}:Scopes must contain at least one non-empty scope.");
             }
 
+            ValidateHeaderList(
+                definition.ForwardedRequestHeaders,
+                providerDefinition?.HasForwardedRequestHeadersSection is true
+                    ? $"{providerConfiguration!.GetSection(name).Path}:{nameof(DownstreamApiDefinition.ForwardedRequestHeaders)}"
+                    : $"{GetPrimaryDefinitionPath(sharedConfiguration, providerConfiguration, name, sharedDefinition, providerDefinition)}:{nameof(DownstreamApiDefinition.ForwardedRequestHeaders)}",
+                DownstreamProxyHeaderPolicy.ValidateConfiguredRequestHeaderName);
+
+            ValidateHeaderList(
+                definition.ForwardedResponseHeaders,
+                providerDefinition?.HasForwardedResponseHeadersSection is true
+                    ? $"{providerConfiguration!.GetSection(name).Path}:{nameof(DownstreamApiDefinition.ForwardedResponseHeaders)}"
+                    : $"{GetPrimaryDefinitionPath(sharedConfiguration, providerConfiguration, name, sharedDefinition, providerDefinition)}:{nameof(DownstreamApiDefinition.ForwardedResponseHeaders)}",
+                DownstreamProxyHeaderPolicy.ValidateConfiguredResponseHeaderName);
+
             effectiveDefinitions[name] = definition;
         }
 
@@ -107,10 +122,19 @@ public sealed class DownstreamApiCatalog
                 BaseUrl = child[nameof(DownstreamApiDefinition.BaseUrl)],
                 RelativePath = child[nameof(DownstreamApiDefinition.RelativePath)],
                 Disabled = child.GetValue<bool?>(nameof(DownstreamApiDefinition.Disabled)),
+                IncludeDefaultForwardedRequestHeaders = child.GetValue<bool?>(nameof(DownstreamApiDefinition.IncludeDefaultForwardedRequestHeaders)),
                 Scopes = child.GetSection(nameof(DownstreamApiDefinition.Scopes)).Exists()
                     ? child.GetSection(nameof(DownstreamApiDefinition.Scopes)).Get<string[]>()
                     : null,
-                HasScopesSection = child.GetSection(nameof(DownstreamApiDefinition.Scopes)).Exists()
+                HasScopesSection = child.GetSection(nameof(DownstreamApiDefinition.Scopes)).Exists(),
+                ForwardedRequestHeaders = child.GetSection(nameof(DownstreamApiDefinition.ForwardedRequestHeaders)).Exists()
+                    ? child.GetSection(nameof(DownstreamApiDefinition.ForwardedRequestHeaders)).Get<string[]>()
+                    : null,
+                HasForwardedRequestHeadersSection = child.GetSection(nameof(DownstreamApiDefinition.ForwardedRequestHeaders)).Exists(),
+                ForwardedResponseHeaders = child.GetSection(nameof(DownstreamApiDefinition.ForwardedResponseHeaders)).Exists()
+                    ? child.GetSection(nameof(DownstreamApiDefinition.ForwardedResponseHeaders)).Get<string[]>()
+                    : null,
+                HasForwardedResponseHeadersSection = child.GetSection(nameof(DownstreamApiDefinition.ForwardedResponseHeaders)).Exists()
             };
         }
 
@@ -132,8 +156,28 @@ public sealed class DownstreamApiCatalog
             Scopes = providerDefinition?.HasScopesSection is true
                 ? providerDefinition.Scopes ?? []
                 : sharedDefinition?.Scopes ?? [],
+            IncludeDefaultForwardedRequestHeaders = providerDefinition?.IncludeDefaultForwardedRequestHeaders
+                ?? sharedDefinition?.IncludeDefaultForwardedRequestHeaders
+                ?? true,
+            ForwardedRequestHeaders = providerDefinition?.HasForwardedRequestHeadersSection is true
+                ? providerDefinition.ForwardedRequestHeaders ?? []
+                : sharedDefinition?.ForwardedRequestHeaders ?? [],
+            ForwardedResponseHeaders = providerDefinition?.HasForwardedResponseHeadersSection is true
+                ? providerDefinition.ForwardedResponseHeaders ?? []
+                : sharedDefinition?.ForwardedResponseHeaders ?? [],
             Disabled = providerDefinition?.Disabled ?? sharedDefinition?.Disabled ?? false
         };
+    }
+
+    private static void ValidateHeaderList(
+        string[] headerNames,
+        string configurationPath,
+        Action<string, string> validateHeaderName)
+    {
+        for (var index = 0; index < headerNames.Length; index++)
+        {
+            validateHeaderName(headerNames[index], $"{configurationPath}:{index}");
+        }
     }
 
     private static string GetPrimaryDefinitionPath(
@@ -158,6 +202,16 @@ public sealed class DownstreamApiCatalog
 
         public bool? Disabled { get; init; }
 
+        public bool? IncludeDefaultForwardedRequestHeaders { get; init; }
+
         public bool HasScopesSection { get; init; }
+
+        public string[]? ForwardedRequestHeaders { get; init; }
+
+        public bool HasForwardedRequestHeadersSection { get; init; }
+
+        public string[]? ForwardedResponseHeaders { get; init; }
+
+        public bool HasForwardedResponseHeadersSection { get; init; }
     }
 }

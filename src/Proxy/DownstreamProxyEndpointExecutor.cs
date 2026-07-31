@@ -1,4 +1,7 @@
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 using System.Net.Http.Headers;
 using System.Security.Claims;
 
@@ -9,19 +12,6 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 /// </summary>
 public static class DownstreamProxyEndpointExecutor
 {
-    private static readonly HashSet<string> BlockedResponseHeaderNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Connection",
-        "Keep-Alive",
-        "Proxy-Authenticate",
-        "Proxy-Authorization",
-        "Set-Cookie",
-        "TE",
-        "Trailer",
-        "Transfer-Encoding",
-        "Upgrade"
-    };
-
     /// <summary>
     /// Proxies the current HTTP request to the specified downstream API and writes the downstream response back to the caller.
     /// </summary>
@@ -34,6 +24,7 @@ public static class DownstreamProxyEndpointExecutor
             => ProxyHttpAsync(
             context,
             proxyClient,
+            context.RequestServices.GetRequiredService<DownstreamApiCatalog>(),
             downstreamApiName,
             $"{context.Request.Path}{context.Request.QueryString}",
             user,
@@ -45,11 +36,25 @@ public static class DownstreamProxyEndpointExecutor
     public static async Task ProxyHttpAsync(
         HttpContext context,
         IDownstreamHttpProxyClient proxyClient,
+        DownstreamApiCatalog downstreamApiCatalog,
         string downstreamApiName,
         string pathAndQuery,
         ClaimsPrincipal? user,
         CancellationToken cancellationToken)
     {
+        var downstreamApi = downstreamApiCatalog.GetRequired(downstreamApiName);
+        var logger = context.RequestServices
+            .GetRequiredService<ILoggerFactory>()
+            .CreateLogger(typeof(DownstreamProxyEndpointExecutor).FullName!);
+        var endpointMetadata = context.GetEndpoint()?.Metadata.GetMetadata<DownstreamProxyEndpointMetadata>();
+        var apiMetadata = endpointMetadata?.GetApiMetadata(downstreamApiName) ?? DownstreamProxyEndpointApiMetadata.Empty;
+        var forwardedHeaders = DownstreamProxyHeaderPolicy.CreateForwardedRequestHeaders(
+            downstreamApi,
+            context.Request.Headers,
+            user,
+            apiMetadata.ClaimHeaderMappings,
+            logger);
+
         using var content = CreateContent(context.Request);
         using var response = await proxyClient.SendAsync(
             downstreamApiName,
@@ -57,10 +62,17 @@ public static class DownstreamProxyEndpointExecutor
             pathAndQuery,
             user,
             content,
-            context.Request.Headers,
+            forwardedHeaders,
             cancellationToken);
 
-        await WriteResponseAsync(context, response, cancellationToken);
+        await WriteResponseAsync(
+            context,
+            response,
+            downstreamApi,
+            downstreamApiName,
+            endpointMetadata?.RoutePrefix ?? DownstreamApiProxyEndpointRouteBuilderExtensions.DefaultRoutePrefix,
+            logger,
+            cancellationToken);
     }
 
     private static HttpContent? CreateContent(HttpRequest request)
@@ -85,62 +97,18 @@ public static class DownstreamProxyEndpointExecutor
             || HttpMethods.IsPatch(method)
             || HttpMethods.IsDelete(method);
 
-    private static async Task WriteResponseAsync(HttpContext context, HttpResponseMessage response, CancellationToken cancellationToken)
+    private static async Task WriteResponseAsync(
+        HttpContext context,
+        HttpResponseMessage response,
+        DownstreamApiDefinition downstreamApi,
+        string downstreamApiName,
+        string routePrefix,
+        ILogger logger,
+        CancellationToken cancellationToken)
     {
         context.Response.StatusCode = (int)response.StatusCode;
-        var additionalBlockedHeaders = GetConnectionDeclaredHeaders(response.Headers);
-
-        foreach (var header in response.Headers)
-        {
-            if (ShouldCopyResponseHeader(header.Key, additionalBlockedHeaders))
-            {
-                context.Response.Headers[header.Key] = header.Value.ToArray();
-            }
-        }
-
-        foreach (var header in response.Content.Headers)
-        {
-            if (ShouldCopyResponseHeader(header.Key, additionalBlockedHeaders))
-            {
-                context.Response.Headers[header.Key] = header.Value.ToArray();
-            }
-        }
-
-        context.Response.Headers.Remove("transfer-encoding");
+        DownstreamProxyHeaderPolicy.CopyResponseHeaders(context, response, downstreamApi, downstreamApiName, routePrefix, logger);
 
         await response.Content.CopyToAsync(context.Response.Body, cancellationToken);
-    }
-
-    private static bool ShouldCopyResponseHeader(string headerName, HashSet<string> additionalBlockedHeaders)
-        => !BlockedResponseHeaderNames.Contains(headerName) && !additionalBlockedHeaders.Contains(headerName);
-
-    private static HashSet<string> GetConnectionDeclaredHeaders(HttpResponseHeaders headers)
-    {
-        var blockedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var headerValue in headers.Connection)
-        {
-            if (string.IsNullOrWhiteSpace(headerValue))
-            {
-                continue;
-            }
-
-            blockedHeaders.Add(headerValue.Trim());
-        }
-
-        if (!headers.TryGetValues("Connection", out var rawValues))
-        {
-            return blockedHeaders;
-        }
-
-        foreach (var rawValue in rawValues)
-        {
-            foreach (var token in rawValue.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                blockedHeaders.Add(token);
-            }
-        }
-
-        return blockedHeaders;
     }
 }

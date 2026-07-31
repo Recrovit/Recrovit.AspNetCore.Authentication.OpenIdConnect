@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Diagnostics;
@@ -16,13 +17,25 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
     public const string DefaultRoutePrefix = "/downstream";
 
     public static IEndpointRouteBuilder MapDownstreamApiProxyEndpoints(this IEndpointRouteBuilder endpoints, string routePrefix = DefaultRoutePrefix)
+        => endpoints.MapDownstreamApiProxyEndpoints(static _ => { }, routePrefix);
+
+    public static IEndpointRouteBuilder MapDownstreamApiProxyEndpoints(
+        this IEndpointRouteBuilder endpoints,
+        Action<DownstreamProxyEndpointOptions> configure,
+        string routePrefix = DefaultRoutePrefix)
     {
         var normalizedRoutePrefix = NormalizeRoutePrefix(routePrefix);
+        var options = new DownstreamProxyEndpointOptions();
+        configure(options);
+        var metadata = options.Build(
+            endpoints.ServiceProvider.GetRequiredService<DownstreamApiCatalog>(),
+            normalizedRoutePrefix);
 
         endpoints.MapMethods(
                 $"{normalizedRoutePrefix}/{{apiName}}",
                 ProxyEndpointConventionBuilderExtensions.DownstreamProxyMethods,
                 ProxyDownstreamApiAsync)
+            .WithMetadata(metadata)
             .WithMetadata(new RequireAntiforgeryTokenAttribute())
             .AsProxyEndpoint()
             .RequireAuthorization()
@@ -33,6 +46,7 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
                 $"{normalizedRoutePrefix}/{{apiName}}/{{**path}}",
                 ProxyEndpointConventionBuilderExtensions.DownstreamProxyMethods,
                 ProxyDownstreamApiAsync)
+            .WithMetadata(metadata)
             .WithMetadata(new RequireAntiforgeryTokenAttribute())
             .AsProxyEndpoint()
             .RequireAuthorization()
@@ -87,6 +101,7 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
             await DownstreamProxyEndpointExecutor.ProxyHttpAsync(
                 context,
                 httpProxyClient,
+                downstreamApiCatalog,
                 apiName,
                 pathAndQuery,
                 context.User,

@@ -14,7 +14,13 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 - Provider-specific downstream API overrides
   - Added support for `Recrovit:OpenIdConnect:Providers:<provider>:DownstreamApis` overrides on top of the shared downstream API catalog.
   - Allowed provider-specific downstream API entries to override base URL and relative path values, and to replace the shared scope list when a provider-specific `Scopes` section is present.
+  - Added `ForwardedRequestHeaders` and `ForwardedResponseHeaders` to downstream API definitions, with provider-specific sections replacing the shared list when present.
+  - Added `IncludeDefaultForwardedRequestHeaders` so downstream APIs can opt out of the built-in request-header defaults while keeping explicit extra request headers.
   - Added `Disabled` support on downstream API definitions so shared or provider-specific entries can be removed from the effective catalog.
+
+- Downstream proxy header and claim-header policy
+  - Added `MapDownstreamApiProxyEndpoints(Action<DownstreamProxyEndpointOptions> configure, string routePrefix = DefaultRoutePrefix)` for immutable per-API claim-header mappings.
+  - Added `ForwardFirstClaimHeader(...)` and `ForwardClaimValuesHeader(...)` endpoint builders so hosts can project claim values into protected outbound headers with host-chosen names.
 
 ### Bugs Fixed
 
@@ -27,8 +33,11 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Returned `400 Bad Request` for invalid downstream proxy paths in both HTTP and transport/WebSocket proxy flows instead of attempting outbound dispatch.
 - Downstream proxy transport and response hardening
   - Enforced absolute `https` downstream API base URLs during startup validation in `Production` so proxied WebSocket connections can only resolve to `wss` targets there.
-  - Blocked downstream `Set-Cookie` forwarding by default to prevent host-origin cookie injection from proxied responses.
-  - Removed hop-by-hop response headers, including headers declared dynamically through `Connection`, before writing proxied downstream responses back to callers.
+  - Disabled automatic downstream redirect following and downstream cookie storage for the typed proxy `HttpClient` so bearer tokens and custom headers are never replayed to a redirected origin.
+  - Replaced the old implicit request forwarding behavior with a safe default request-header set (`Accept`, `Accept-Language`, `If-None-Match`, `If-Modified-Since`) plus per-API request-header extensions, with explicit API-level opt-out support.
+  - Blocked downstream `Set-Cookie`, `Set-Cookie2`, `Refresh`, CORS headers, host-owned security headers, and hop-by-hop response headers before writing proxied downstream responses back to callers.
+  - Rewrote downstream `Location` headers only when the redirect target stayed on the configured downstream origin and under the configured downstream root; dropped invalid or external redirect targets without changing the response status code.
+  - Protected server-generated claim headers against client spoofing by removing same-named inbound headers before host-generated values are applied.
 - Downstream proxy browser-origin protection
   - Expanded the secure-by-default downstream proxy protection policy from `GET`-only to the full generic proxy surface, including WebSocket handshakes.
   - Renamed `Recrovit:OpenIdConnect:Host:DownstreamProxyGetProtection` to `DownstreamProxyRequestProtection` and replaced the old GET-specific options types with request-wide equivalents.
@@ -64,6 +73,7 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Added proxy tests for valid relative path handling, origin preservation, empty-path behavior, and rejection of unsafe proxy path forms.
   - Expanded regression coverage for encoded separators, backslash variants, port-switch attempts, transport/WebSocket path validation, and downstream `Set-Cookie` injection filtering.
   - Added regression coverage for strict fetch-metadata evaluation, origin fallback validation, unsafe-method antiforgery enforcement, WebSocket origin allowlists, and explicit missing-origin WebSocket opt-ins.
+  - Added coverage for empty and configured request-header allowlists, protected claim-header overrides, response-header allowlists, redirect rewriting, and downstream API header-list override validation.
 - Token state architecture and documentation
   - Added `IOidcSessionStateStore`, versioned session-state types, HMAC cache-key derivation, and configuration coverage for the new token-state model.
   - Updated token lifecycle and production configuration documentation to describe the session-aggregate store, shared HMAC secret requirement, deployment-mode semantics, and multi-instance refresh coordination expectations.
@@ -74,6 +84,10 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Renamed `Recrovit:OpenIdConnect:Host:DownstreamProxyGetProtection` to `DownstreamProxyRequestProtection`.
   - Replaced the GET-specific options and enum types with request-wide equivalents: `DownstreamProxyRequestProtectionOptions` and `ProxyRequestProtectionMode`.
   - Tightened the default generic proxy policy so hosts that relied on the previous GET-only protection behavior must update frontend request handling and configuration for unsafe HTTP methods and WebSocket handshakes.
+- Downstream proxy header forwarding defaults
+  - Removed the previous implicit forwarding behavior, including the client-controlled `rgf-*` wildcard.
+  - Changed the default downstream proxy request forwarding policy to a built-in cache/content-negotiation header set with per-API extension and explicit opt-out support through `IncludeDefaultForwardedRequestHeaders`.
+  - Clarified that CORS and host-security response policy remains host-owned; downstream response headers in those categories are always suppressed.
 
 
 ## [10.1.0] - 2026-07-10

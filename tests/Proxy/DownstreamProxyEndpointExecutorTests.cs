@@ -1,7 +1,9 @@
 using System.Net;
 using System.Text;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
 using Xunit;
@@ -22,6 +24,21 @@ public sealed class DownstreamProxyEndpointExecutorTests
         context.Request.ContentLength = 18;
         context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"message":"hello"}"""));
         context.Response.Body = new MemoryStream();
+        var downstreamApiCatalog = new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com",
+                RelativePath = "gateway",
+                Scopes = ["openid"],
+                ForwardedRequestHeaders = ["Accept-Language"],
+                ForwardedResponseHeaders = ["X-Trace-Id"]
+            }
+        });
+        context.RequestServices = new ServiceCollection()
+            .AddLogging()
+            .AddSingleton(downstreamApiCatalog)
+            .BuildServiceProvider();
 
         var downstreamResponse = new HttpResponseMessage(HttpStatusCode.Accepted)
         {
@@ -43,7 +60,9 @@ public sealed class DownstreamProxyEndpointExecutorTests
         await DownstreamProxyEndpointExecutor.ProxyHttpAsync(
             context,
             proxyClient,
+            downstreamApiCatalog,
             "SessionValidationApi",
+            "/gateway/session/check?page=2",
             user,
             CancellationToken.None);
 
@@ -82,6 +101,11 @@ public sealed class DownstreamProxyEndpointExecutorTests
         context.Request.ContentLength = 0;
         context.Request.Body = new MemoryStream();
         context.Response.Body = new MemoryStream();
+        var downstreamApiCatalog = TestFactories.CreateDownstreamApiCatalog(relativePath: string.Empty);
+        context.RequestServices = new ServiceCollection()
+            .AddLogging()
+            .AddSingleton(downstreamApiCatalog)
+            .BuildServiceProvider();
 
         var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -91,7 +115,9 @@ public sealed class DownstreamProxyEndpointExecutorTests
         await DownstreamProxyEndpointExecutor.ProxyHttpAsync(
             context,
             proxyClient,
+            downstreamApiCatalog,
             "SessionValidationApi",
+            "/gateway/session/check",
             user: null,
             CancellationToken.None);
 
@@ -110,6 +136,11 @@ public sealed class DownstreamProxyEndpointExecutorTests
         context.Request.ContentLength = 15;
         context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"status":"ok"}"""));
         context.Response.Body = new MemoryStream();
+        var downstreamApiCatalog = TestFactories.CreateDownstreamApiCatalog(relativePath: string.Empty);
+        context.RequestServices = new ServiceCollection()
+            .AddLogging()
+            .AddSingleton(downstreamApiCatalog)
+            .BuildServiceProvider();
 
         var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -119,7 +150,9 @@ public sealed class DownstreamProxyEndpointExecutorTests
         await DownstreamProxyEndpointExecutor.ProxyHttpAsync(
             context,
             proxyClient,
+            downstreamApiCatalog,
             "SessionValidationApi",
+            "/gateway/session/check",
             user: null,
             CancellationToken.None);
 

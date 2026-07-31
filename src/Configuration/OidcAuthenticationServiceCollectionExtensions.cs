@@ -169,7 +169,12 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddHttpContextAccessor();
         services.AddHttpClient();
         services.AddAntiforgery();
-        services.AddHttpClient<IDownstreamHttpProxyClient, DownstreamHttpProxyClient>();
+        services.AddHttpClient<IDownstreamHttpProxyClient, DownstreamHttpProxyClient>()
+            .ConfigurePrimaryHttpMessageHandler(static () => new HttpClientHandler
+            {
+                AllowAutoRedirect = false,
+                UseCookies = false
+            });
         services.AddSingleton<ProxyEndpointMatcher>();
         services.AddSingleton<IDownstreamProxyRequestProtectionEvaluator, DownstreamProxyRequestProtectionEvaluator>();
         services.AddScoped<IDownstreamTransportProxyClient, DownstreamTransportProxyClient>();
