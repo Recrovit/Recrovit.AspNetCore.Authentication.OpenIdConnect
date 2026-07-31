@@ -11,9 +11,12 @@ internal static class OidcEndpointHttpsValidator
             return null;
         }
 
-        return Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) &&
-            string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+        return IsAbsoluteHttpsUri(endpoint)
             ? null
             : $"Production requires {endpointDisplayName} to be an absolute HTTPS URI.";
     }
+
+    public static bool IsAbsoluteHttpsUri(string endpoint)
+        => Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) &&
+            string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
 }

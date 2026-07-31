@@ -15,19 +15,22 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
 
 internal static class TestFactories
 {
-    public static DownstreamApiCatalog CreateDownstreamApiCatalog(string relativePath = "session-check")
+    public static DownstreamApiCatalog CreateDownstreamApiCatalog(
+        string relativePath = "session-check",
+        string sessionValidationBaseUrl = "https://api.example.com",
+        string graphApiBaseUrl = "https://graph.example.com")
     {
         return new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
         {
             ["SessionValidationApi"] = new()
             {
-                BaseUrl = "https://api.example.com",
+                BaseUrl = sessionValidationBaseUrl,
                 Scopes = ["openid"],
                 RelativePath = relativePath
             },
             ["GraphApi"] = new()
             {
-                BaseUrl = "https://graph.example.com",
+                BaseUrl = graphApiBaseUrl,
                 Scopes = ["graph.read"],
                 RelativePath = "graph"
             }
@@ -96,11 +99,20 @@ internal static class TestFactories
         IDownstreamUserTokenProvider tokenProvider,
         ILogger<DownstreamHttpProxyClient> logger)
     {
+        return CreateHttpProxyClient(httpClient, tokenProvider, logger, CreateDownstreamApiCatalog(relativePath: "gateway"));
+    }
+
+    public static DownstreamHttpProxyClient CreateHttpProxyClient(
+        HttpClient httpClient,
+        IDownstreamUserTokenProvider tokenProvider,
+        ILogger<DownstreamHttpProxyClient> logger,
+        DownstreamApiCatalog downstreamApiCatalog)
+    {
         return new DownstreamHttpProxyClient(
             logger,
             httpClient,
             tokenProvider,
-            CreateDownstreamApiCatalog(relativePath: "gateway"));
+            downstreamApiCatalog);
     }
 
     public static Endpoint CreateEndpoint(params object[] metadata)

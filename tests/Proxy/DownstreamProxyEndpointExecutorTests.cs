@@ -28,8 +28,14 @@ public sealed class DownstreamProxyEndpointExecutorTests
             Content = new StringContent("""{"status":"ok"}""", Encoding.UTF8, OidcAuthenticationConstants.MediaTypes.Json)
         };
         downstreamResponse.Headers.TryAddWithoutValidation("X-Trace-Id", "trace-123");
+        downstreamResponse.Headers.TryAddWithoutValidation("Set-Cookie", "__Host-Auth=attacker; Secure; Path=/");
+        downstreamResponse.Headers.TryAddWithoutValidation("Connection", "keep-alive, x-hop-header");
+        downstreamResponse.Headers.TryAddWithoutValidation("Keep-Alive", "timeout=5");
+        downstreamResponse.Headers.TryAddWithoutValidation("Upgrade", "websocket");
+        downstreamResponse.Headers.TryAddWithoutValidation("X-Hop-Header", "blocked");
         downstreamResponse.Headers.TransferEncodingChunked = true;
         downstreamResponse.Content.Headers.ContentLanguage.Add("hu");
+        downstreamResponse.Content.Headers.TryAddWithoutValidation("Trailer", "Expires");
 
         var proxyClient = new RecordingDownstreamHttpProxyClient(downstreamResponse);
         var user = TestUsers.CreateAuthenticatedUser();
@@ -52,6 +58,12 @@ public sealed class DownstreamProxyEndpointExecutorTests
         Assert.Equal(StatusCodes.Status202Accepted, context.Response.StatusCode);
         Assert.Equal("trace-123", context.Response.Headers["X-Trace-Id"]);
         Assert.Equal("hu", context.Response.Headers["Content-Language"]);
+        Assert.False(context.Response.Headers.ContainsKey("Set-Cookie"));
+        Assert.False(context.Response.Headers.ContainsKey("Connection"));
+        Assert.False(context.Response.Headers.ContainsKey("Keep-Alive"));
+        Assert.False(context.Response.Headers.ContainsKey("Upgrade"));
+        Assert.False(context.Response.Headers.ContainsKey("Trailer"));
+        Assert.False(context.Response.Headers.ContainsKey("X-Hop-Header"));
         Assert.False(context.Response.Headers.ContainsKey("transfer-encoding"));
 
         context.Response.Body.Position = 0;

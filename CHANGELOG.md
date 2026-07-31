@@ -17,6 +17,10 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Rejected absolute, scheme-relative, and backslash-authority proxy path inputs before any outbound downstream request is created.
   - Enforced exact downstream origin matching for resolved proxy targets so outbound scheme, host, and port remain pinned to the configured downstream API base URL.
   - Returned `400 Bad Request` for invalid downstream proxy paths in both HTTP and transport/WebSocket proxy flows instead of attempting outbound dispatch.
+- Downstream proxy transport and response hardening
+  - Enforced absolute `https` downstream API base URLs during startup validation in `Production` so proxied WebSocket connections can only resolve to `wss` targets there.
+  - Blocked downstream `Set-Cookie` forwarding by default to prevent host-origin cookie injection from proxied responses.
+  - Removed hop-by-hop response headers, including headers declared dynamically through `Connection`, before writing proxied downstream responses back to callers.
 
 ### Other Changes
 
@@ -25,6 +29,7 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Expanded configuration documentation for provider-level downstream API customization and disabling.
 - Proxy regression coverage
   - Added proxy tests for valid relative path handling, origin preservation, empty-path behavior, and rejection of unsafe proxy path forms.
+  - Expanded regression coverage for encoded separators, backslash variants, port-switch attempts, transport/WebSocket path validation, and downstream `Set-Cookie` injection filtering.
 
 
 ## [10.1.0] - 2026-07-10

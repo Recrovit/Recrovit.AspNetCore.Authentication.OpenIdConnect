@@ -465,6 +465,19 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 throw new InvalidOperationException(authorityHttpsError);
             }
 
+            foreach (var (apiName, definition) in downstreamApiCatalog.Apis.OrderBy(static api => api.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                if (OidcEndpointHttpsValidator.IsAbsoluteHttpsUri(definition.BaseUrl))
+                {
+                    continue;
+                }
+
+                var downstreamHttpsError =
+                    $"Production requires {OpenIdConnectConfigurationResolver.RootSectionName}:DownstreamApis:{apiName}:BaseUrl to be an absolute HTTPS URI.";
+                OidcInfrastructureLog.StartupValidationFailed(logger, "downstream-api-https", downstreamHttpsError);
+                throw new InvalidOperationException(downstreamHttpsError);
+            }
+
             var forwardedHeadersError = ForwardedHeadersConfiguration.GetProductionRequirementError(hostSecurityOptions, environment);
             if (forwardedHeadersError is not null)
             {

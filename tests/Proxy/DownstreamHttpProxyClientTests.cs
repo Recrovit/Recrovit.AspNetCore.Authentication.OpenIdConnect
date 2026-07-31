@@ -1,5 +1,6 @@
 using System.Net;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Primitives;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
@@ -194,6 +195,16 @@ public sealed class DownstreamHttpProxyClientTests
             CancellationToken.None));
         Assert.Contains("authority-like", schemeRelativeException.Message, StringComparison.OrdinalIgnoreCase);
 
+        var encodedSeparatorException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/%2F%2Fattacker.example/collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+        Assert.Contains("authority-like", encodedSeparatorException.Message, StringComparison.OrdinalIgnoreCase);
+
         var backslashException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
             "SessionValidationApi",
             HttpMethod.Get,
@@ -204,6 +215,32 @@ public sealed class DownstreamHttpProxyClientTests
             CancellationToken.None));
         Assert.Contains("authority-like", backslashException.Message, StringComparison.OrdinalIgnoreCase);
 
+        Assert.Null(captureHandler.LastRequest);
+    }
+
+    [Fact]
+    public async Task SendAsync_RejectsProxyPathThatChangesPort()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(
+            httpClient,
+            new StubDownstreamUserTokenProvider(),
+            NullLogger<Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy.DownstreamHttpProxyClient>.Instance,
+            TestFactories.CreateDownstreamApiCatalog(relativePath: string.Empty, sessionValidationBaseUrl: "https://api.example.com:443"));
+
+        var portSwitchException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/https://api.example.com:444/collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+
+        Assert.True(
+            portSwitchException.Message.Contains("absolute URI", StringComparison.OrdinalIgnoreCase) ||
+            portSwitchException.Message.Contains("configured downstream origin", StringComparison.OrdinalIgnoreCase));
         Assert.Null(captureHandler.LastRequest);
     }
 }

@@ -32,14 +32,22 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         using var absolutePathResponse = await client.GetAsync("/downstream/GraphApi/https://attacker.example/collect", TestContext.Current.CancellationToken);
         using var schemeRelativeResponse = await client.GetAsync("/downstream/GraphApi/%2F%2Fattacker.example/collect", TestContext.Current.CancellationToken);
         using var backslashAuthorityResponse = await client.GetAsync("/downstream/GraphApi/%5C%5Cattacker.example%5Ccollect", TestContext.Current.CancellationToken);
+        using var portSwitchResponse = await client.GetAsync("/downstream/PortApi/https://api.example.com:444/collect", TestContext.Current.CancellationToken);
         using var webSocketInvalidResponse = await client.GetAsync("/downstream/GraphApi/https://attacker.example/socket?ws=true", TestContext.Current.CancellationToken);
+        using var webSocketEncodedSeparatorResponse = await client.GetAsync("/downstream/GraphApi/%2F%2Fattacker.example/socket?ws=true", TestContext.Current.CancellationToken);
+        using var webSocketBackslashResponse = await client.GetAsync("/downstream/GraphApi/%5C%5Cattacker.example%5Csocket?ws=true", TestContext.Current.CancellationToken);
+        using var webSocketPortSwitchResponse = await client.GetAsync("/downstream/PortApi/https://api.example.com:444/socket?ws=true", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         Assert.Equal(HttpStatusCode.Accepted, emptyPathResponse.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, absolutePathResponse.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, schemeRelativeResponse.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, backslashAuthorityResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, portSwitchResponse.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, webSocketInvalidResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, webSocketEncodedSeparatorResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, webSocketBackslashResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, webSocketPortSwitchResponse.StatusCode);
         Assert.Equal("GraphApi", proxyClient.DownstreamApiName);
         Assert.Equal(HttpMethod.Get, proxyClient.Method);
         Assert.Equal("?expand=roles", proxyClient.PathAndQuery);
@@ -72,7 +80,27 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
 
         builder.WebHost.UseTestServer();
         builder.Services.AddAuthorization();
-        builder.Services.AddSingleton(TestFactories.CreateDownstreamApiCatalog(relativePath: string.Empty));
+        builder.Services.AddSingleton(new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com",
+                Scopes = ["openid"],
+                RelativePath = string.Empty
+            },
+            ["GraphApi"] = new()
+            {
+                BaseUrl = "https://graph.example.com",
+                Scopes = ["graph.read"],
+                RelativePath = string.Empty
+            },
+            ["PortApi"] = new()
+            {
+                BaseUrl = "https://api.example.com:443",
+                Scopes = ["openid"],
+                RelativePath = string.Empty
+            }
+        }));
         builder.Services.Replace(ServiceDescriptor.Singleton<IDownstreamHttpProxyClient>(proxyClient));
         builder.Services.Replace(ServiceDescriptor.Singleton<IDownstreamTransportProxyClient>(transportProxyClient ?? new NoOpDownstreamTransportProxyClient()));
 

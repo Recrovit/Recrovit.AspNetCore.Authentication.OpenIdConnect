@@ -9,6 +9,19 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 /// </summary>
 public static class DownstreamProxyEndpointExecutor
 {
+    private static readonly HashSet<string> BlockedResponseHeaderNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Connection",
+        "Keep-Alive",
+        "Proxy-Authenticate",
+        "Proxy-Authorization",
+        "Set-Cookie",
+        "TE",
+        "Trailer",
+        "Transfer-Encoding",
+        "Upgrade"
+    };
+
     /// <summary>
     /// Proxies the current HTTP request to the specified downstream API and writes the downstream response back to the caller.
     /// </summary>
@@ -75,10 +88,11 @@ public static class DownstreamProxyEndpointExecutor
     private static async Task WriteResponseAsync(HttpContext context, HttpResponseMessage response, CancellationToken cancellationToken)
     {
         context.Response.StatusCode = (int)response.StatusCode;
+        var additionalBlockedHeaders = GetConnectionDeclaredHeaders(response.Headers);
 
         foreach (var header in response.Headers)
         {
-            if (ShouldCopyHeader(header.Key))
+            if (ShouldCopyResponseHeader(header.Key, additionalBlockedHeaders))
             {
                 context.Response.Headers[header.Key] = header.Value.ToArray();
             }
@@ -86,7 +100,7 @@ public static class DownstreamProxyEndpointExecutor
 
         foreach (var header in response.Content.Headers)
         {
-            if (ShouldCopyHeader(header.Key))
+            if (ShouldCopyResponseHeader(header.Key, additionalBlockedHeaders))
             {
                 context.Response.Headers[header.Key] = header.Value.ToArray();
             }
@@ -97,6 +111,36 @@ public static class DownstreamProxyEndpointExecutor
         await response.Content.CopyToAsync(context.Response.Body, cancellationToken);
     }
 
-    private static bool ShouldCopyHeader(string headerName) =>
-        !headerName.Equals("transfer-encoding", StringComparison.OrdinalIgnoreCase);
+    private static bool ShouldCopyResponseHeader(string headerName, HashSet<string> additionalBlockedHeaders)
+        => !BlockedResponseHeaderNames.Contains(headerName) && !additionalBlockedHeaders.Contains(headerName);
+
+    private static HashSet<string> GetConnectionDeclaredHeaders(HttpResponseHeaders headers)
+    {
+        var blockedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var headerValue in headers.Connection)
+        {
+            if (string.IsNullOrWhiteSpace(headerValue))
+            {
+                continue;
+            }
+
+            blockedHeaders.Add(headerValue.Trim());
+        }
+
+        if (!headers.TryGetValues("Connection", out var rawValues))
+        {
+            return blockedHeaders;
+        }
+
+        foreach (var rawValue in rawValues)
+        {
+            foreach (var token in rawValue.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                blockedHeaders.Add(token);
+            }
+        }
+
+        return blockedHeaders;
+    }
 }

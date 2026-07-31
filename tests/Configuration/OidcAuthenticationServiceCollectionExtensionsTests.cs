@@ -849,6 +849,51 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenProductionDownstreamApiIsNotHttps()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = "http://api.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production });
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains($"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("absolute HTTPS URI", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_AllowsNonHttpsDownstreamApiOutsideProduction()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = "http://api.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development });
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenProductionForwardedHeadersEnabledWithoutTrustedProxies()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
