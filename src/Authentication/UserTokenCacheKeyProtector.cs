@@ -9,7 +9,7 @@ internal sealed class UserTokenCacheKeyProtector(IOptions<TokenCacheOptions> tok
 {
     public string CreateSessionFingerprint(UserTokenCacheKeyContext context)
     {
-        var payload = $"{context.Provider}\n{context.Issuer}\n{context.SubjectId}\n{context.SessionId}";
+        var payload = context.CreateSessionKey();
         var secret = tokenCacheOptions.Value.CacheKeyHmacSecret;
         var hash = HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(payload));
         return Convert.ToHexString(hash);

@@ -15,7 +15,7 @@ internal sealed class LocalOidcSessionCoordinator(
         ClaimsPrincipal user,
         CancellationToken cancellationToken)
     {
-        var sessionKey = CreateSessionKey(cacheKeyContextAccessor.GetRequiredContext(user));
+        var sessionKey = cacheKeyContextAccessor.GetRequiredContext(user).CreateSessionKey();
         LockEntry entry;
         lock (syncRoot)
         {
@@ -40,9 +40,6 @@ internal sealed class LocalOidcSessionCoordinator(
 
         return new Lease(this, sessionKey, entry);
     }
-
-    private static string CreateSessionKey(UserTokenCacheKeyContext context)
-        => $"{context.Provider}\n{context.Issuer}\n{context.SubjectId}\n{context.SessionId}";
 
     private void Release(string sessionKey, LockEntry entry)
     {

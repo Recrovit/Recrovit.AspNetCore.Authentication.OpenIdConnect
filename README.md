@@ -250,7 +250,7 @@ With this configuration:
 
 For example, if `BaseUrl` is `https://api.example.com/gateway` and `RelativePath` is `session/check`, the effective downstream root is `https://api.example.com/gateway/session/check`. Proxy route suffixes are appended under that root, and traversal-style inputs that would resolve outside it are rejected before any outbound request is created.
 
-### Downstream Proxy GET Browser Protection
+### Downstream Proxy Request Protection
 
 The host options include `Recrovit:OpenIdConnect:Host:DownstreamProxyRequestProtection` for the generic downstream proxy surface.
 
@@ -318,6 +318,13 @@ Use these rules for `CacheKeyHmacSecret`:
 - prefer a unique value even for single-instance deployments
 - do not commit it to source control
 - load it from a secret store or from configuration backed by an environment variable such as `Recrovit__OpenIdConnect__TokenCache__CacheKeyHmacSecret`
+
+`DeploymentMode` defaults to `SingleInstance`.
+
+- Use `SingleInstance` for development and simple one-node hosts that use the package defaults.
+- Use `MultiInstance` only when the host replaces both `IOidcSessionRefreshLockProvider` and `IOidcSessionStateStore`.
+- A multi-instance refresh lock provider must coordinate one authenticated session across nodes for the whole lease duration.
+- A multi-instance session state store must provide atomic cross-node compare-and-swap semantics for the complete session aggregate.
 
 ### `Recrovit:OpenIdConnect:Infrastructure`
 
@@ -395,6 +402,7 @@ In development or simple single-instance local runs, you can usually omit it. In
       "TokenCache": {
         "CacheKeyPrefix": "oidc-user-token-cache",
         "CacheKeyHmacSecret": "<load-from-secret-store-or-environment>",
+        "DeploymentMode": "SingleInstance",
         "RefreshBeforeExpirationSeconds": 60
       },
       "Infrastructure": {
@@ -751,9 +759,9 @@ This behavior is handled through `OidcSessionCleanupService`.
 
 The distributed token cache and refresh coordination are session-scoped, not just user-scoped. Multiple concurrent browser sessions for the same subject therefore keep isolated token state, refresh locks, logout cleanup, and reauthentication behavior.
 
-Within one application process, `ILocalOidcSessionCoordinator` serializes every state-changing operation for the same provider, issuer, subject, and local session ID. Sign-in persistence, API-token writes, refresh rotation, logout, session cleanup, and corrupted-payload deletion therefore use one process-wide session lock even though the token store itself is scoped. Refresh holds this local lock through the token endpoint exchange and persistence; logout removes the token aggregate and clears the local cookie before releasing it.
+Within one application process, the package serializes every state-changing operation for the same provider, issuer, subject, and local session ID. Sign-in persistence, API-token writes, refresh rotation, logout, session cleanup, and corrupted-payload deletion therefore use one process-wide session lock even though the token store itself is scoped. Refresh holds this local lock through the token endpoint exchange and persistence; logout removes the token aggregate and clears the local cookie before releasing it.
 
-`ILocalOidcSessionCoordinator` is process-local only. Multi-instance hosts still need a cross-node `IOidcSessionRefreshLockProvider` and an `IOidcSessionStateStore` with atomic cross-node compare-and-swap semantics.
+This local coordination is process-local only. Multi-instance hosts still need a cross-node `IOidcSessionRefreshLockProvider` and an `IOidcSessionStateStore` with atomic cross-node compare-and-swap semantics.
 
 Refresh persistence is modeled as a versioned compare-and-swap update of the complete session token payload. This prevents an older refresh result from overwriting a newer refresh token when token rotation is enabled and prevents a completed refresh from restoring state deleted by logout.
 
@@ -857,33 +865,22 @@ This makes API and proxy consumers receive status codes instead of browser-orien
 
 The package validates key production requirements during startup.
 
-In production:
+Production checklist:
 
-- a shared distributed cache is required for user token storage
-- `AddDistributedMemoryCache` is not sufficient for multi-instance production use
-- an explicit shared Data Protection key repository is required
-- `HostSecurityOptions.DataProtectionKeysPath` remains supported as a backward-compatible way to configure that repository
-- `TokenCacheOptions.CacheKeyHmacSecret` must be deployment-specific and must not use the built-in development default
-- `TokenCacheOptions.CacheKeyHmacSecret` should be generated from at least 32 random bytes
-- `TokenCacheOptions.CacheKeyHmacSecret` should be loaded from a secret store or environment-backed configuration, not from source-controlled configuration
-- `TokenCacheOptions.CacheKeyHmacSecret` must be shared across all nodes of the same multi-instance deployment
-- a unique `TokenCacheOptions.CacheKeyHmacSecret` is still recommended for single-instance deployments
-- if production still uses the built-in development default, startup logs a warning without logging the secret value
-- `TokenCacheOptions.DeploymentMode` defaults to `SingleInstance`
-- when `TokenCacheOptions.DeploymentMode` is set to `MultiInstance`, the host must replace both `IOidcSessionRefreshLockProvider` and `IOidcSessionStateStore`
-- the replacement refresh lock provider must coordinate one authenticated session across nodes for the whole lease duration
-- the replacement session state store must provide atomic cross-node compare-and-swap semantics for the full session aggregate
+- replace the development in-memory distributed cache with a shared `IDistributedCache` backend
+- configure an explicit shared Data Protection key repository through `DataProtectionKeysPath`, the callback overload, or host-level Data Protection setup
+- use a deployment-specific `TokenCacheOptions.CacheKeyHmacSecret` generated from at least 32 random bytes
+- load token-cache secrets from a secret store or environment-backed configuration, not source-controlled configuration
+- keep the same HMAC secret and Data Protection application name across all nodes of the same deployment
+- configure trusted forwarded-header proxies or networks when forwarded headers are enabled
 
-When `DataProtectionSecurityProfile` is set to `Hardened`, production startup also requires:
+`AddRecrovitOpenIdConnectInfrastructure()` registers `AddDistributedMemoryCache()` as a safe default for development and simple single-instance runs. Production hosts should replace it so encrypted token-cache entries remain available across restarts and across multiple application instances.
 
-- explicit Data Protection application isolation through `SetApplicationName(...)`
-- explicit key-ring encryption when the key repository is configured explicitly
+`TokenCacheOptions.DeploymentMode` defaults to `SingleInstance`. If it is set to `MultiInstance`, startup fails fast unless the host replaces both the default in-process `IOidcSessionRefreshLockProvider` and the default non-atomic `IOidcSessionStateStore`.
 
-`AddRecrovitOpenIdConnectInfrastructure()` registers `AddDistributedMemoryCache()` as a safe default for development and simple single-instance runs. Production hosts should replace that default with a shared `IDistributedCache` backend so encrypted token-cache entries remain available across restarts and across multiple application instances.
+When `DataProtectionSecurityProfile` is set to `Hardened`, production startup also requires explicit Data Protection application isolation through `SetApplicationName(...)` and key-ring encryption when an explicit repository is configured.
 
-If `DeploymentMode` is explicitly set to `MultiInstance` while the default single-node refresh lock or the default distributed token store is still registered, startup fails fast with a configuration error.
-
-The package validates that the effective sign-in scope set is not empty and that each configured downstream API declares a non-empty scope list.
+The package also validates that the effective sign-in scope set is not empty and that each configured downstream API declares a non-empty scope list. If production still uses the built-in development HMAC default, startup logs a warning without logging the secret value.
 
 ## SQL Server Distributed Cache Example
 

@@ -2,85 +2,55 @@
 
 This file contains the release history for `Recrovit.AspNetCore.Authentication.OpenIdConnect`.
 
-## [Unreleased]
+## [10.2.0] - Unreleased
 
 ### Features Added
 
-- Extensible Data Protection configuration
-  - Added a new `AddOidcAuthenticationInfrastructure(..., Action<IDataProtectionBuilder>? configureDataProtection)` overload so host applications can extend or override the package Data Protection setup.
+- Data Protection configuration
+  - Added `AddOidcAuthenticationInfrastructure(..., Action<IDataProtectionBuilder>? configureDataProtection)` so hosts can extend the package Data Protection setup.
   - Added `DataProtectionSecurityProfile` with backward-compatible `Standard` behavior and opt-in `Hardened` startup validation.
-  - Kept `Recrovit:OpenIdConnect:Infrastructure:DataProtectionKeysPath` supported as a legacy configuration path while allowing host-level or callback-based explicit key repository configuration.
+  - Kept `Recrovit:OpenIdConnect:Infrastructure:DataProtectionKeysPath` supported while allowing callback-based or host-level key repository configuration.
 
-- Provider-specific downstream API overrides
-  - Added support for `Recrovit:OpenIdConnect:Providers:<provider>:DownstreamApis` overrides on top of the shared downstream API catalog.
-  - Allowed provider-specific downstream API entries to override base URL and relative path values, and to replace the shared scope list when a provider-specific `Scopes` section is present.
-  - Added `ForwardedRequestHeaders` and `ForwardedResponseHeaders` to downstream API definitions, with provider-specific sections replacing the shared list when present.
-  - Added `IncludeDefaultForwardedRequestHeaders` so downstream APIs can opt out of the built-in request-header defaults while keeping explicit extra request headers.
-  - Added `Disabled` support on downstream API definitions so shared or provider-specific entries can be removed from the effective catalog.
+- Downstream API and proxy configuration
+  - Added provider-specific `DownstreamApis` overrides, including base URL, relative path, scope replacement, header-list replacement, and `Disabled` support.
+  - Added request and response header allowlists to downstream API definitions, plus `IncludeDefaultForwardedRequestHeaders`.
+  - Added `MapDownstreamApiProxyEndpoints(Action<DownstreamProxyEndpointOptions> configure, string routePrefix = DefaultRoutePrefix)` with immutable per-API claim-header mappings through `ForwardFirstClaimHeader(...)` and `ForwardClaimValuesHeader(...)`.
 
-- Downstream proxy header and claim-header policy
-  - Added `MapDownstreamApiProxyEndpoints(Action<DownstreamProxyEndpointOptions> configure, string routePrefix = DefaultRoutePrefix)` for immutable per-API claim-header mappings.
-  - Added `ForwardFirstClaimHeader(...)` and `ForwardClaimValuesHeader(...)` endpoint builders so hosts can project claim values into protected outbound headers with host-chosen names.
+- Token session-state and refresh coordination
+  - Reworked token persistence around one encrypted, versioned session aggregate instead of separate session/API-token cache entries.
+  - Added `IOidcSessionStateStore`, `IOidcSessionRefreshLockProvider`, HMAC-derived cache keys, and `TokenCacheOptions.DeploymentMode`.
+  - Added multi-instance fail-fast validation when default single-node refresh locking or default non-atomic session state storage is still registered.
 
 ### Bugs Fixed
 
-- Downstream proxy URI hardening
-  - Rejected absolute, scheme-relative, and backslash-authority proxy path inputs before any outbound downstream request is created.
-  - Enforced exact downstream origin matching for resolved proxy targets so outbound scheme, host, and port remain pinned to the configured downstream API base URL.
-  - Constrained resolved proxy targets to the configured downstream root path so requests cannot escape the effective `BaseUrl + RelativePath` prefix while staying on the same origin.
-  - Preserved path segments already present on the configured downstream API `BaseUrl` so base-path deployments remain confined to that host-relative root.
-  - Rejected dot-segment and multi-pass encoded traversal payloads before any outbound downstream request is created.
-  - Returned `400 Bad Request` for invalid downstream proxy paths in both HTTP and transport/WebSocket proxy flows instead of attempting outbound dispatch.
-- Downstream proxy transport and response hardening
-  - Enforced absolute `https` downstream API base URLs during startup validation in `Production` so proxied WebSocket connections can only resolve to `wss` targets there.
-  - Disabled automatic downstream redirect following and downstream cookie storage for the typed proxy `HttpClient` so bearer tokens and custom headers are never replayed to a redirected origin.
-  - Replaced the old implicit request forwarding behavior with a safe default request-header set (`Accept`, `Accept-Language`, `If-None-Match`, `If-Modified-Since`) plus per-API request-header extensions, with explicit API-level opt-out support.
-  - Blocked downstream `Set-Cookie`, `Set-Cookie2`, `Refresh`, CORS headers, host-owned security headers, and hop-by-hop response headers before writing proxied downstream responses back to callers.
-  - Rewrote downstream `Location` headers only when the redirect target stayed on the configured downstream origin and under the configured downstream root; dropped invalid or external redirect targets without changing the response status code.
-  - Protected server-generated claim headers against client spoofing by removing same-named inbound headers before host-generated values are applied.
-- Downstream proxy browser-origin protection
-  - Expanded the secure-by-default downstream proxy protection policy from `GET`-only to the full generic proxy surface, including WebSocket handshakes.
-  - Renamed `Recrovit:OpenIdConnect:Host:DownstreamProxyGetProtection` to `DownstreamProxyRequestProtection` and replaced the old GET-specific options types with request-wide equivalents.
-  - Changed the default HTTP policy to accept only `Sec-Fetch-Site: same-origin`, with `same-site` available only through explicit opt-in and `none` rejected in strict mode.
-  - Required valid antiforgery tokens for cookie-authenticated unsafe proxy methods after origin policy acceptance, returning `400 Bad Request` on antiforgery failure before any outbound dispatch.
-  - Added strict WebSocket `Origin` validation with exact scheme, host, and effective-port matching, explicit allowlists, `null` rejection, and opt-in support for missing `Origin` on non-browser clients.
-  - Rejects blocked proxy requests with `403 Forbidden` before any outbound downstream request is created.
-- Session token refresh concurrency and cache hardening
-  - Added public `ILocalOidcSessionCoordinator` and `ILocalOidcSessionLockLease` contracts with a singleton process-local implementation shared by scoped token stores.
-  - Serialized sign-in persistence, API-token writes, refresh rotation, logout, cleanup, and corrupted-cache deletion through one session-scoped local lock.
-  - Ordered logout and cleanup so token state is removed before the local cookie is cleared, while preventing refresh persistence from running concurrently for the same session.
-  - Prevented compare-and-swap retries from recreating a session aggregate after logout or persisting a refresh result produced from an obsolete rotated refresh token.
-  - Reworked stored token persistence around a single versioned session payload so refresh token rotation and downstream API token updates are coordinated through compare-and-swap writes.
-  - Changed refresh coordination from per-API in-process locking to session-scoped locking with lease metadata, and wired the provider refresh flow to re-read and retry on concurrent state changes.
-  - Added `TokenCacheOptions.DeploymentMode` with `SingleInstance` default behavior and `MultiInstance` fail-fast startup validation when the host keeps the default single-node refresh lock or default non-atomic session-state store.
-  - Added public `IOidcSessionRefreshLockProvider` and `IOidcSessionRefreshLockLease` contracts so hosts can replace refresh coordination with cross-node implementations.
-  - Tightened the documented `IOidcSessionStateStore` contract so `MultiInstance` deployments require atomic cross-node compare-and-swap semantics for the full session aggregate.
-  - Discarded refresh results when the acquired lease has already expired before persistence, and reuses newer stored token state after compare-and-swap contention instead of overwriting it.
-  - Deletes corrupted protected session-state payloads from the cache after logging a warning so broken entries deterministically lead to cleanup and reauthentication.
-  - Replaced raw subject, issuer, and session-id cache key segments with HMAC-derived session fingerprints so external cache keys no longer expose reversible identity metadata.
-  - Removed the separate API-token index model so logout and session cleanup deterministically delete the entire stored token state for the authenticated session.
+- Hardened downstream proxy resolution and forwarding
+  - Rejected absolute, scheme-relative, backslash-authority, dot-segment, and multi-pass encoded traversal paths before outbound dispatch.
+  - Pinned resolved proxy targets to the configured downstream origin and effective `BaseUrl + RelativePath` root.
+  - Disabled downstream redirect following and cookie storage for the proxy `HttpClient`.
+  - Replaced implicit request-header forwarding with safe defaults and per-API allowlists.
+  - Suppressed downstream cookies, CORS headers, host-owned security headers, hop-by-hop headers, and unsafe redirect targets in proxied responses.
+  - Protected server-generated claim headers against client spoofing.
+
+- Hardened downstream proxy request protection
+  - Expanded proxy browser-origin protection from `GET`-only to the full generic proxy surface, including unsafe HTTP methods and WebSocket handshakes.
+  - Renamed `DownstreamProxyGetProtection` to `DownstreamProxyRequestProtection` and replaced GET-specific option types with request-wide equivalents.
+  - Required valid antiforgery tokens for cookie-authenticated unsafe proxy methods after origin policy acceptance.
+  - Added strict WebSocket `Origin` validation with explicit allowlists, `null` rejection, and opt-in support for missing `Origin` on non-browser clients.
+
+- Hardened token refresh and cleanup
+  - Serialized sign-in persistence, API-token writes, refresh rotation, logout, cleanup, and corrupted-cache deletion through a package-internal session-scoped local lock.
+  - Prevented refresh compare-and-swap retries from restoring deleted sessions or persisting results produced from obsolete rotated refresh tokens.
+  - Reused newer stored token state after compare-and-swap contention instead of overwriting it.
+  - Deleted corrupted protected session-state payloads after logging.
+  - Replaced raw issuer, subject, and session-id cache key segments with HMAC-derived session fingerprints.
+  - Fixed the default refresh lock provider so canceled waits do not leak lease references and lease disposal is idempotent.
 
 ### Other Changes
 
-- Token cache HMAC secret guidance and diagnostics
-  - Added a production startup warning when `TokenCacheOptions.CacheKeyHmacSecret` still uses the built-in development default.
-  - Clarified the README guidance for deployment-specific HMAC secrets, secure loading, and multi-instance secret sharing.
-
-- Data Protection diagnostics, tests, and docs
-  - Added startup validation and warning coverage for explicit Data Protection repository, application isolation, and key-ring encryption scenarios.
-  - Expanded test coverage for callback-based configuration, host-preconfigured Data Protection, and `Standard` versus `Hardened` profile behavior.
-  - Updated the README with callback-based configuration, certificate/DPAPI/external KMS examples, and deployment guidance for Data Protection isolation and key rotation.
-- Downstream API configuration coverage
-  - Added tests covering provider-specific downstream API overrides and disabling behavior.
-  - Expanded configuration documentation for provider-level downstream API customization and disabling.
-- Proxy regression coverage
-  - Added proxy tests for valid relative path handling, origin preservation, empty-path behavior, and rejection of unsafe proxy path forms.
-  - Expanded regression coverage for encoded separators, backslash variants, port-switch attempts, transport/WebSocket path validation, and downstream `Set-Cookie` injection filtering.
-  - Added regression coverage for strict fetch-metadata evaluation, origin fallback validation, unsafe-method antiforgery enforcement, WebSocket origin allowlists, and explicit missing-origin WebSocket opt-ins.
-  - Added coverage for empty and configured request-header allowlists, protected claim-header overrides, response-header allowlists, redirect rewriting, and downstream API header-list override validation.
-- Token state architecture and documentation
-  - Added `IOidcSessionStateStore`, versioned session-state types, HMAC cache-key derivation, and configuration coverage for the new token-state model.
-  - Updated token lifecycle and production configuration documentation to describe the session-aggregate store, shared HMAC secret requirement, deployment-mode semantics, and multi-instance refresh coordination expectations.
+- Documentation and tests
+  - Clarified README guidance for provider-specific downstream APIs, proxy request protection, token-cache HMAC secrets, Data Protection configuration, and multi-instance requirements.
+  - Added and updated regression coverage for Data Protection validation, downstream API overrides, proxy path/header/origin hardening, token-state persistence, refresh coordination, and cleanup behavior.
+  - Kept process-local session coordination as an internal package implementation detail.
 
 ### Breaking Changes
 
@@ -92,6 +62,9 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Removed the previous implicit forwarding behavior, including the client-controlled `rgf-*` wildcard.
   - Changed the default downstream proxy request forwarding policy to a built-in cache/content-negotiation header set with per-API extension and explicit opt-out support through `IncludeDefaultForwardedRequestHeaders`.
   - Clarified that CORS and host-security response policy remains host-owned; downstream response headers in those categories are always suppressed.
+- Token-state extensibility
+  - Custom token-state stores used for multi-instance deployments must implement `IOidcSessionStateStore` with atomic cross-node compare-and-swap semantics.
+  - Process-local session lock interfaces are internal implementation details and are not part of the public package API.
 
 
 ## [10.1.0] - 2026-07-10

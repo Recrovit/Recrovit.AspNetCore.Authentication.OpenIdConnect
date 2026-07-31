@@ -114,7 +114,7 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
     /// <summary>
     /// Initializes a new instance of the <see cref="OidcDownstreamUserTokenProvider"/> class with explicit local session coordination.
     /// </summary>
-    public OidcDownstreamUserTokenProvider(
+    internal OidcDownstreamUserTokenProvider(
         IDownstreamUserTokenStore tokenStore,
         DownstreamApiCatalog downstreamApiCatalog,
         IOptions<OidcProviderOptions> oidcOptions,
@@ -235,7 +235,11 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
 
         await using var localSessionLock = await localSessionCoordinator.AcquireAsync(user, cancellationToken);
 
-        var sessionState = await sessionStateStore.GetSessionStateAsync(user, localSessionLock, cancellationToken);
+        var sessionState = await LocalOidcSessionStoreOperations.GetSessionStateAsync(
+            sessionStateStore,
+            user,
+            localSessionLock,
+            cancellationToken);
         entry = TryGetApiTokenEntry(sessionState, apiTokenKey);
         refreshRequired = NeedsRefresh(entry, refreshSkew);
         OidcTokenProviderLog.ApiTokenCacheEvaluated(logger, downstreamApiName, entry is not null, refreshRequired);
@@ -286,7 +290,11 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         {
             if (attempt > 0)
             {
-                latestState = await sessionStateStore.GetSessionStateAsync(user, localSessionLock, cancellationToken);
+                latestState = await LocalOidcSessionStoreOperations.GetSessionStateAsync(
+                    sessionStateStore,
+                    user,
+                    localSessionLock,
+                    cancellationToken);
             }
 
             var latestEntry = TryGetApiTokenEntry(latestState, apiTokenKey);
@@ -323,7 +331,8 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
                 sourceRefreshToken,
                 refreshCompletedUtc);
 
-            if (await sessionStateStore.TryCompareAndSwapSessionStateAsync(
+            if (await LocalOidcSessionStoreOperations.TryCompareAndSwapSessionStateAsync(
+                sessionStateStore,
                 user,
                 latestState?.Version,
                 nextState,
@@ -460,7 +469,11 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         ILocalOidcSessionLockLease localSessionLock,
         CancellationToken cancellationToken)
     {
-        var latestState = await sessionStateStore.GetSessionStateAsync(user, localSessionLock, cancellationToken);
+        var latestState = await LocalOidcSessionStoreOperations.GetSessionStateAsync(
+            sessionStateStore,
+            user,
+            localSessionLock,
+            cancellationToken);
         var latestEntry = TryGetApiTokenEntry(latestState, apiTokenKey);
         if (!NeedsRefresh(latestEntry, refreshSkew))
         {

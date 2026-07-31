@@ -153,7 +153,11 @@ public static class AuthenticationEndpoints
             await using var localSessionLock = await localSessionCoordinator.AcquireAsync(
                 httpContext.User,
                 httpContext.RequestAborted);
-            await tokenStore.RemoveAsync(httpContext.User, localSessionLock, httpContext.RequestAborted);
+            await LocalOidcSessionStoreOperations.RemoveAsync(
+                tokenStore,
+                httpContext.User,
+                localSessionLock,
+                httpContext.RequestAborted);
             await signOutResult.ExecuteAsync(httpContext);
         }
         else

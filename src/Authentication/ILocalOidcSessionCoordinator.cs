@@ -9,7 +9,7 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 /// This coordinator does not provide cross-node exclusion and does not replace
 /// <see cref="IOidcSessionRefreshLockProvider"/> in multi-instance deployments.
 /// </remarks>
-public interface ILocalOidcSessionCoordinator
+internal interface ILocalOidcSessionCoordinator
 {
     /// <summary>
     /// Acquires the process-local lock for the specified authenticated session.
@@ -20,6 +20,6 @@ public interface ILocalOidcSessionCoordinator
 /// <summary>
 /// Represents ownership of a process-local authenticated-session lock.
 /// </summary>
-public interface ILocalOidcSessionLockLease : IAsyncDisposable
+internal interface ILocalOidcSessionLockLease : IAsyncDisposable
 {
 }

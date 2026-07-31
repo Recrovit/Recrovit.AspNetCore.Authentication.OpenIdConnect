@@ -32,7 +32,11 @@ internal sealed class OidcSessionCleanupService(
             await using var localSessionLock = await localSessionCoordinator.AcquireAsync(
                 principalToCleanup,
                 httpContext.RequestAborted);
-            await tokenStore.RemoveAsync(principalToCleanup, localSessionLock, httpContext.RequestAborted);
+            await LocalOidcSessionStoreOperations.RemoveAsync(
+                tokenStore,
+                principalToCleanup,
+                localSessionLock,
+                httpContext.RequestAborted);
             OidcSessionCleanupLog.SessionCleanupTokensRemoved(logger, reason);
 
             await httpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);

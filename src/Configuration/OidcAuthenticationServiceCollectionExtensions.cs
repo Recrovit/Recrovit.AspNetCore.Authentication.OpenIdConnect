@@ -393,7 +393,8 @@ public static class OidcAuthenticationServiceCollectionExtensions
                         await using var localSessionLock = await localSessionCoordinator.AcquireAsync(
                             principal,
                             context.HttpContext.RequestAborted);
-                        await tokenStore.StoreSessionTokenSetAsync(
+                        await LocalOidcSessionStoreOperations.StoreSessionTokenSetAsync(
+                            tokenStore,
                             principal,
                             StoredOidcSessionTokenSet.FromAuthenticationProperties(authenticationProperties, timeProvider),
                             localSessionLock,

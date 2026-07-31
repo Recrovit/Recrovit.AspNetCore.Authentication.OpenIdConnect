@@ -402,10 +402,7 @@ public sealed class OidcDownstreamUserTokenProviderTests
         var logout = Task.Run(async () =>
         {
             await using var localSessionLock = await coordinator.AcquireAsync(user, TestContext.Current.CancellationToken);
-            await ((IDownstreamUserTokenStore)tokenStore).RemoveAsync(
-                user,
-                localSessionLock,
-                TestContext.Current.CancellationToken);
+            await tokenStore.RemoveAsync(user, TestContext.Current.CancellationToken);
         }, TestContext.Current.CancellationToken);
 
         await Task.Delay(50, TestContext.Current.CancellationToken);
@@ -437,10 +434,7 @@ public sealed class OidcDownstreamUserTokenProviderTests
             new DelegatingHttpClientFactory(handler),
             localSessionCoordinator: coordinator);
         var logoutLock = await coordinator.AcquireAsync(user, TestContext.Current.CancellationToken);
-        await ((IDownstreamUserTokenStore)tokenStore).RemoveAsync(
-            user,
-            logoutLock,
-            TestContext.Current.CancellationToken);
+        await tokenStore.RemoveAsync(user, TestContext.Current.CancellationToken);
 
         var refresh = provider.GetAccessTokenAsync(user, "SessionValidationApi", TestContext.Current.CancellationToken);
         await Task.Delay(50, TestContext.Current.CancellationToken);

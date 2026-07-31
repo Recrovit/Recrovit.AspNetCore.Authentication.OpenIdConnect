@@ -13,12 +13,11 @@ internal sealed class UserRefreshLockProvider(
 
     public async Task<IOidcSessionRefreshLockLease> AcquireAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
-        var context = cacheKeyContextAccessor.GetRequiredContext(user);
-        var userKey = $"{context.Provider}:{context.Issuer}:{context.SubjectId}:{context.SessionId}";
-        LockEntry? entry;
+        var userKey = cacheKeyContextAccessor.GetRequiredContext(user).CreateSessionKey();
+        LockEntry entry;
         lock (syncRoot)
         {
-            if (!entries.TryGetValue(userKey, out entry))
+            if (!entries.TryGetValue(userKey, out entry!))
             {
                 entry = new LockEntry();
                 entries[userKey] = entry;
@@ -27,8 +26,16 @@ internal sealed class UserRefreshLockProvider(
             entry.LeaseCount++;
         }
 
-        ArgumentNullException.ThrowIfNull(entry);
-        await entry.Semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            await entry.Semaphore.WaitAsync(cancellationToken);
+        }
+        catch
+        {
+            RemoveLeaseReference(userKey, entry);
+            throw;
+        }
+
         return new Releaser(
             this,
             userKey,
@@ -40,7 +47,11 @@ internal sealed class UserRefreshLockProvider(
     private void Release(string userKey, LockEntry entry)
     {
         entry.Semaphore.Release();
+        RemoveLeaseReference(userKey, entry);
+    }
 
+    private void RemoveLeaseReference(string userKey, LockEntry entry)
+    {
         lock (syncRoot)
         {
             entry.LeaseCount--;
@@ -71,9 +82,15 @@ internal sealed class UserRefreshLockProvider(
 
         public DateTimeOffset ExpiresAtUtc { get; } = expiresAtUtc;
 
+        private int released;
+
         public ValueTask DisposeAsync()
         {
-            owner.Release(userKey, entry);
+            if (Interlocked.Exchange(ref released, 1) == 0)
+            {
+                owner.Release(userKey, entry);
+            }
+
             return ValueTask.CompletedTask;
         }
     }

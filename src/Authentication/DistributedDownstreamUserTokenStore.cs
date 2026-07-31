@@ -51,7 +51,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     /// <summary>
     /// Initializes a new instance of the <see cref="DistributedDownstreamUserTokenStore"/> class.
     /// </summary>
-    public DistributedDownstreamUserTokenStore(
+    internal DistributedDownstreamUserTokenStore(
         IDistributedCache distributedCache,
         IDataProtectionProvider dataProtectionProvider,
         IOptions<TokenCacheOptions> tokenCacheOptions,
@@ -72,7 +72,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     /// <summary>
     /// Initializes a new instance of the <see cref="DistributedDownstreamUserTokenStore"/> class.
     /// </summary>
-    public DistributedDownstreamUserTokenStore(
+    internal DistributedDownstreamUserTokenStore(
         IDistributedCache distributedCache,
         IDataProtectionProvider dataProtectionProvider,
         IOptions<TokenCacheOptions> tokenCacheOptions,
@@ -101,7 +101,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     }
 
     /// <inheritdoc />
-    public Task<VersionedOidcSessionState?> GetSessionStateAsync(
+    internal Task<VersionedOidcSessionState?> GetSessionStateAsync(
         ClaimsPrincipal user,
         ILocalOidcSessionLockLease localSessionLock,
         CancellationToken cancellationToken)
@@ -133,7 +133,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     }
 
     /// <inheritdoc />
-    public Task<bool> TryCompareAndSwapSessionStateAsync(
+    internal Task<bool> TryCompareAndSwapSessionStateAsync(
         ClaimsPrincipal user,
         string? expectedVersion,
         OidcSessionState newState,
@@ -185,7 +185,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     }
 
     /// <inheritdoc />
-    public Task DeleteSessionStateAsync(
+    internal Task DeleteSessionStateAsync(
         ClaimsPrincipal user,
         ILocalOidcSessionLockLease localSessionLock,
         CancellationToken cancellationToken)
@@ -213,7 +213,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     }
 
     /// <inheritdoc />
-    public Task StoreSessionTokenSetAsync(
+    internal Task StoreSessionTokenSetAsync(
         ClaimsPrincipal user,
         StoredOidcSessionTokenSet tokenSet,
         ILocalOidcSessionLockLease localSessionLock,
@@ -270,7 +270,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     }
 
     /// <inheritdoc />
-    public Task StoreApiTokenAsync(
+    internal Task StoreApiTokenAsync(
         ClaimsPrincipal user,
         string downstreamApiName,
         IReadOnlyCollection<string> scopes,
@@ -310,7 +310,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     }
 
     /// <inheritdoc />
-    public Task RemoveAsync(
+    internal Task RemoveAsync(
         ClaimsPrincipal user,
         ILocalOidcSessionLockLease localSessionLock,
         CancellationToken cancellationToken)
