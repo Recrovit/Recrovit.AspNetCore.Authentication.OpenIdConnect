@@ -180,6 +180,9 @@ Behavior:
 
 - `apiName` is resolved from `DownstreamApiCatalog`
 - the downstream base URL, scopes, and configured `RelativePath` come from the matching `DownstreamApiDefinition`
+- the effective downstream proxy root is the configured `BaseUrl + RelativePath`
+- if `BaseUrl` already contains a path segment, that path remains part of the downstream root and is not replaced by the proxy route path
+- the route path after `/downstream/{apiName}` is appended only within that configured downstream root; attempts to escape it are rejected with `400 Bad Request`
 - the host acquires or refreshes the signed-in user's downstream access token through `IDownstreamUserTokenProvider`
 - the request is forwarded through the built-in downstream HTTP proxy infrastructure
 - cookie-authenticated downstream proxy `GET` requests are protected against cross-site browser initiation by default
@@ -210,6 +213,8 @@ With this configuration:
 - `GET /downstream/UserInfoApi` forwards to the configured `RelativePath` for `UserInfoApi`
 - `GET /downstream/UserInfoApi/some/extra/path?x=1` appends `some/extra/path?x=1` after the configured route prefix
 - request bodies are forwarded for the supported HTTP methods, including `POST`, `PUT`, `PATCH`, and `DELETE`
+
+For example, if `BaseUrl` is `https://api.example.com/gateway` and `RelativePath` is `session/check`, the effective downstream root is `https://api.example.com/gateway/session/check`. Proxy route suffixes are appended under that root, and traversal-style inputs that would resolve outside it are rejected before any outbound request is created.
 
 ### Downstream Proxy GET Browser Protection
 

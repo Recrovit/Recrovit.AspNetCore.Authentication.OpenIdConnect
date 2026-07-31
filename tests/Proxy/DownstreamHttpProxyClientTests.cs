@@ -243,4 +243,80 @@ public sealed class DownstreamHttpProxyClientTests
             portSwitchException.Message.Contains("configured downstream origin", StringComparison.OrdinalIgnoreCase));
         Assert.Null(captureHandler.LastRequest);
     }
+
+    [Theory]
+    [InlineData("/../../admin")]
+    [InlineData("/./health")]
+    [InlineData("/%2e%2e/admin")]
+    [InlineData("/%2e./admin")]
+    [InlineData("/.%2e/admin")]
+    [InlineData("/%252e%252e/admin")]
+    [InlineData("/..%2fadmin")]
+    [InlineData("/..%5cadmin")]
+    public async Task SendAsync_RejectsTraversalPayloads(string pathAndQuery)
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(httpClient, new StubDownstreamUserTokenProvider());
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            pathAndQuery,
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+
+        Assert.Contains("path", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(captureHandler.LastRequest);
+    }
+
+    [Fact]
+    public async Task SendAsync_RejectsResolvedPathOutsideConfiguredRelativeRoot()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(
+            httpClient,
+            new StubDownstreamUserTokenProvider(),
+            NullLogger<Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy.DownstreamHttpProxyClient>.Instance,
+            TestFactories.CreateDownstreamApiCatalog(relativePath: "gateway/api"));
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/../../admin",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+
+        Assert.Contains("path", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(captureHandler.LastRequest);
+    }
+
+    [Fact]
+    public async Task SendAsync_AllowsResolvedPathWithinConfiguredBasePath()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(
+            httpClient,
+            new StubDownstreamUserTokenProvider(),
+            NullLogger<Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy.DownstreamHttpProxyClient>.Instance,
+            TestFactories.CreateDownstreamApiCatalog(relativePath: string.Empty, sessionValidationBaseUrl: "https://api.example.com/gateway"));
+
+        using var response = await client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/session/check?id=5",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("https://api.example.com/gateway/session/check?id=5", captureHandler.LastRequest!.RequestUri!.ToString());
+    }
 }

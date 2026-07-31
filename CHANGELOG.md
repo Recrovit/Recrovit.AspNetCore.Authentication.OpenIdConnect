@@ -21,6 +21,9 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 - Downstream proxy URI hardening
   - Rejected absolute, scheme-relative, and backslash-authority proxy path inputs before any outbound downstream request is created.
   - Enforced exact downstream origin matching for resolved proxy targets so outbound scheme, host, and port remain pinned to the configured downstream API base URL.
+  - Constrained resolved proxy targets to the configured downstream root path so requests cannot escape the effective `BaseUrl + RelativePath` prefix while staying on the same origin.
+  - Preserved path segments already present on the configured downstream API `BaseUrl` so base-path deployments remain confined to that host-relative root.
+  - Rejected dot-segment and multi-pass encoded traversal payloads before any outbound downstream request is created.
   - Returned `400 Bad Request` for invalid downstream proxy paths in both HTTP and transport/WebSocket proxy flows instead of attempting outbound dispatch.
 - Downstream proxy transport and response hardening
   - Enforced absolute `https` downstream API base URLs during startup validation in `Production` so proxied WebSocket connections can only resolve to `wss` targets there.

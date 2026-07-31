@@ -190,36 +190,64 @@ internal static class DownstreamProxyUtilities
 
     private static Uri CreateValidatedDownstreamUri(DownstreamApiDefinition downstreamApi, string pathAndQuery)
     {
-        ValidateIncomingPath(pathAndQuery);
-
-        var baseUri = new Uri(downstreamApi.BaseUrl, UriKind.Absolute);
-        var resolvedUri = new Uri(baseUri, BuildPathAndQuery(downstreamApi.RelativePath, pathAndQuery));
-
-        if (!HasMatchingOrigin(baseUri, resolvedUri))
+        try
         {
-            throw new InvalidDownstreamProxyPathException("The downstream proxy path resolved outside the configured downstream origin.");
-        }
+            ValidateIncomingPath(pathAndQuery);
 
-        return resolvedUri;
+            var baseUri = new Uri(downstreamApi.BaseUrl, UriKind.Absolute);
+            var resolvedUri = BuildResolvedUri(baseUri, downstreamApi.RelativePath, pathAndQuery);
+
+            ValidateResolvedUri(baseUri, downstreamApi.RelativePath, resolvedUri);
+            return resolvedUri;
+        }
+        catch (InvalidDownstreamProxyPathException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is UriFormatException or ArgumentException)
+        {
+            throw new InvalidDownstreamProxyPathException("The downstream proxy path is malformed.");
+        }
     }
 
     private static void ValidateIncomingPath(string pathAndQuery)
     {
-        var path = GetPathPart(pathAndQuery);
+        var path = GetPathPart(pathAndQuery).ToString();
+        ValidateAuthorityLikePrefix(path);
+        ValidateDecodedPathStages(path);
+    }
+
+    private static void ValidateAuthorityLikePrefix(string path)
+    {
         if (path.Length >= 2 && IsSlashOrBackslash(path[0]) && IsSlashOrBackslash(path[1]))
         {
             throw new InvalidDownstreamProxyPathException("The downstream proxy path must not use an authority-like prefix.");
         }
 
-        var trimmedPath = path.TrimStart('/').ToString();
+        var trimmedPath = path.TrimStart('/');
         if (StartsWithEncodedAuthorityPrefix(trimmedPath))
         {
             throw new InvalidDownstreamProxyPathException("The downstream proxy path must not use an authority-like prefix.");
         }
+    }
 
-        if (Uri.TryCreate(trimmedPath, UriKind.Absolute, out _))
+    private static void ValidateDecodedPathStages(string rawPath)
+    {
+        var decodedPath = rawPath;
+
+        for (var decodePass = 0; decodePass < 3; decodePass++)
         {
-            throw new InvalidDownstreamProxyPathException("The downstream proxy path must not be an absolute URI.");
+            ValidateAbsoluteUri(decodedPath);
+            ValidateDotSegments(decodedPath);
+
+            var nextPath = Uri.UnescapeDataString(decodedPath);
+            if (string.Equals(nextPath, decodedPath, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            ValidateAuthorityLikePrefix(nextPath);
+            decodedPath = nextPath;
         }
     }
 
@@ -231,11 +259,111 @@ internal static class DownstreamProxyUtilities
             : pathAndQuery.AsSpan();
     }
 
+    private static string GetQueryPart(string pathAndQuery)
+    {
+        var queryIndex = pathAndQuery.IndexOf('?');
+        if (queryIndex < 0 || queryIndex == pathAndQuery.Length - 1)
+        {
+            return string.Empty;
+        }
+
+        return pathAndQuery[(queryIndex + 1)..];
+    }
+
     private static bool HasMatchingOrigin(Uri expectedOrigin, Uri actualUri)
     {
         return string.Equals(expectedOrigin.Scheme, actualUri.Scheme, StringComparison.OrdinalIgnoreCase)
             && string.Equals(expectedOrigin.Host, actualUri.Host, StringComparison.OrdinalIgnoreCase)
             && GetEffectivePort(expectedOrigin) == GetEffectivePort(actualUri);
+    }
+
+    private static void ValidateResolvedUri(Uri baseUri, string? relativePath, Uri resolvedUri)
+    {
+        if (!HasMatchingOrigin(baseUri, resolvedUri))
+        {
+            throw new InvalidDownstreamProxyPathException("The downstream proxy path resolved outside the configured downstream origin.");
+        }
+
+        if (!IsUnderConfiguredRoot(baseUri, relativePath, resolvedUri))
+        {
+            throw new InvalidDownstreamProxyPathException("The downstream proxy path resolved outside the configured downstream root path.");
+        }
+    }
+
+    private static bool IsUnderConfiguredRoot(Uri baseUri, string? relativePath, Uri resolvedUri)
+    {
+        var configuredRootPath = BuildConfiguredRootPath(baseUri.AbsolutePath, relativePath);
+        var resolvedPath = NormalizePathForComparison(resolvedUri.AbsolutePath);
+
+        return configuredRootPath == "/"
+            || string.Equals(resolvedPath, configuredRootPath, StringComparison.Ordinal)
+            || resolvedPath.StartsWith(configuredRootPath + "/", StringComparison.Ordinal);
+    }
+
+    private static Uri BuildResolvedUri(Uri baseUri, string? relativePath, string pathAndQuery)
+    {
+        var builder = new UriBuilder(baseUri)
+        {
+            Path = BuildCombinedAbsolutePath(baseUri.AbsolutePath, relativePath, GetPathPart(pathAndQuery).ToString()),
+            Query = GetQueryPart(pathAndQuery)
+        };
+
+        return builder.Uri;
+    }
+
+    private static string BuildConfiguredRootPath(string basePath, string? relativePath)
+    {
+        return NormalizePathForComparison(BuildCombinedAbsolutePath(basePath, relativePath, string.Empty));
+    }
+
+    private static string BuildCombinedAbsolutePath(string basePath, string? relativePath, string requestPath)
+    {
+        var segments = new[]
+        {
+            basePath,
+            relativePath ?? string.Empty,
+            requestPath
+        };
+
+        var combinedPath = string.Join(
+            "/",
+            segments
+                .SelectMany(static segment => segment.Split('/', StringSplitOptions.RemoveEmptyEntries))
+                .Where(static segment => !string.IsNullOrWhiteSpace(segment)));
+
+        return string.IsNullOrEmpty(combinedPath) ? "/" : "/" + combinedPath;
+    }
+
+    private static string NormalizePathForComparison(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || string.Equals(path, "/", StringComparison.Ordinal))
+        {
+            return "/";
+        }
+
+        var trimmed = path.TrimEnd('/');
+        return trimmed.StartsWith("/") ? trimmed : "/" + trimmed;
+    }
+
+    private static void ValidateAbsoluteUri(string path)
+    {
+        var trimmedPath = path.TrimStart('/');
+        if (Uri.TryCreate(trimmedPath, UriKind.Absolute, out _))
+        {
+            throw new InvalidDownstreamProxyPathException("The downstream proxy path must not be an absolute URI.");
+        }
+    }
+
+    private static void ValidateDotSegments(string path)
+    {
+        var normalizedPath = path.Replace('\\', '/');
+        foreach (var segment in normalizedPath.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment is "." or "..")
+            {
+                throw new InvalidDownstreamProxyPathException("The downstream proxy path must not contain dot-segment traversal.");
+            }
+        }
     }
 
     private static int GetEffectivePort(Uri uri)

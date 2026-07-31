@@ -58,6 +58,119 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
     }
 
     [Theory]
+    [InlineData("/downstream/GraphApi/%252e%252e/admin")]
+    [InlineData("/downstream/GraphApi/..%2fadmin")]
+    [InlineData("/downstream/GraphApi/..%5cadmin")]
+    public async Task MapDownstreamApiProxyEndpoints_ReturnsBadRequest_ForTraversalPayloads(string requestPath)
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var transportProxyClient = new RecordingDownstreamTransportProxyClient();
+
+        await using var app = await CreateApplicationAsync(proxyClient, transportProxyClient);
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await client.GetAsync(requestPath, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, proxyClient.CallCount);
+        Assert.Equal(0, transportProxyClient.CallCount);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ReturnsBadRequest_ForTraversalPayloadsOnWebSocketRequests()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var transportProxyClient = new RecordingDownstreamTransportProxyClient();
+
+        await using var app = await CreateApplicationAsync(proxyClient, transportProxyClient);
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await client.GetAsync("/downstream/GraphApi/%252e%252e/socket?ws=true", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, proxyClient.CallCount);
+        Assert.Equal(0, transportProxyClient.CallCount);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ConfinesRequestsToConfiguredRelativeRoot()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var catalog = new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com",
+                Scopes = ["openid"],
+                RelativePath = "gateway/api"
+            },
+            ["GraphApi"] = new()
+            {
+                BaseUrl = "https://graph.example.com",
+                Scopes = ["graph.read"],
+                RelativePath = "gateway/api"
+            }
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient, downstreamApiCatalog: catalog);
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+
+        using var acceptedResponse = await client.GetAsync("/downstream/GraphApi/users?id=7", TestContext.Current.CancellationToken);
+        using var rejectedResponse = await client.GetAsync("/downstream/GraphApi/..%2fadmin", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, acceptedResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, rejectedResponse.StatusCode);
+        Assert.Equal(1, proxyClient.CallCount);
+        Assert.Equal("/users?id=7", proxyClient.PathAndQuery);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_AllowsRequestsWithinConfiguredBasePath()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var catalog = new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com/gateway",
+                Scopes = ["openid"],
+                RelativePath = string.Empty
+            },
+            ["GraphApi"] = new()
+            {
+                BaseUrl = "https://graph.example.com/gateway",
+                Scopes = ["graph.read"],
+                RelativePath = string.Empty
+            }
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient, downstreamApiCatalog: catalog);
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+
+        using var response = await client.GetAsync("/downstream/GraphApi/users?id=7", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, proxyClient.CallCount);
+        Assert.Equal("/users?id=7", proxyClient.PathAndQuery);
+    }
+
+    [Theory]
     [InlineData("same-origin")]
     [InlineData("same-site")]
     [InlineData("none")]
@@ -199,7 +312,8 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
     private static async Task<WebApplication> CreateApplicationAsync(
         IDownstreamHttpProxyClient proxyClient,
         IDownstreamTransportProxyClient? transportProxyClient = null,
-        DownstreamProxyGetProtectionOptions? protectionOptions = null)
+        DownstreamProxyGetProtectionOptions? protectionOptions = null,
+        DownstreamApiCatalog? downstreamApiCatalog = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -208,7 +322,7 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
 
         builder.WebHost.UseTestServer();
         builder.Services.AddAuthorization();
-        builder.Services.AddSingleton(new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        builder.Services.AddSingleton(downstreamApiCatalog ?? new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
         {
             ["SessionValidationApi"] = new()
             {
