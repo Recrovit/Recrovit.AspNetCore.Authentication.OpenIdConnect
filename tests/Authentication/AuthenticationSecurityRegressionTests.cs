@@ -268,6 +268,7 @@ public sealed class AuthenticationSecurityRegressionTests
         builder.Services.AddSingleton<SignOutRecorder>();
         builder.Services.Replace(ServiceDescriptor.Singleton<IAuthenticationService, RecordingAuthenticationService>());
         builder.Services.AddScoped<IDownstreamUserTokenStore>(services => services.GetRequiredService<InMemoryTokenStore>());
+        builder.Services.AddScoped<IOidcSessionStateStore>(services => services.GetRequiredService<InMemoryTokenStore>());
         builder.Services.AddScoped<IDownstreamUserTokenProvider, StubDownstreamUserTokenProvider>();
 
         var app = builder.Build();
@@ -318,9 +319,11 @@ public sealed class AuthenticationSecurityRegressionTests
             [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid"
         }));
         builder.AddRecrovitOpenIdConnectInfrastructure();
-        builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => new InMemoryTokenStore(
+        var tokenStore = new InMemoryTokenStore(
             authenticatedUser ?? TestUsers.CreateAuthenticatedUser(),
-            CreateStoredTokenEntry(authenticatedUser))));
+            CreateStoredTokenEntry(authenticatedUser));
+        builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
+        builder.Services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         builder.Services.Replace(ServiceDescriptor.Singleton<IDownstreamUserTokenProvider>(tokenProvider));
 
         var app = builder.Build();
@@ -354,6 +357,7 @@ public sealed class AuthenticationSecurityRegressionTests
         builder.Services.Replace(ServiceDescriptor.Singleton<TimeProvider>(new FixedTimeProvider(now)));
         builder.Services.AddSingleton(tokenStore);
         builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
+        builder.Services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         builder.Services.Replace(ServiceDescriptor.Singleton<IDownstreamUserTokenProvider, StubDownstreamUserTokenProvider>());
 
         var app = builder.Build();

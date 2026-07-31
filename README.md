@@ -217,8 +217,9 @@ Bound to `TokenCacheOptions`.
 Key responsibilities:
 
 - cache key prefix for encrypted stored user tokens
-  cache entries are scoped separately for OIDC session tokens and per-API access tokens
+- shared HMAC secret for deriving non-reversible session cache identifiers from provider, issuer, subject, and local session metadata
 - refresh skew, which controls how early token refresh starts before access token expiration
+- refresh lock lease duration for session-scoped refresh coordination
 
 ### `Recrovit:OpenIdConnect:Infrastructure`
 
@@ -485,7 +486,7 @@ await fetch("/authentication/logout?returnUrl=%2F", {
 
 When the OIDC sign-in ticket is received, the package stores the OIDC session token set in an external authenticated session token store through `IDownstreamUserTokenStore`.
 
-The default distributed token store encrypts the cached refresh token, ID token, and per-API access token payloads with ASP.NET Core Data Protection before writing them to the cache backend.
+The default distributed token store encrypts a single versioned session payload with ASP.NET Core Data Protection before writing it to the cache backend. That payload contains the session refresh token, ID token, and any cached per-API access tokens for the authenticated local session.
 
 After storage, the package removes the tokens from the authentication properties before they remain in the authentication cookie. In practice, this means the host keeps the sign-in cookie for local session state, while session tokens and downstream API access tokens are retained separately and scoped to that specific local authenticated session.
 
@@ -514,6 +515,10 @@ When the package decides the user must sign in again, it clears the local sessio
 This behavior is handled through `OidcSessionCleanupService`.
 
 The distributed token cache and refresh coordination are session-scoped, not just user-scoped. Multiple concurrent browser sessions for the same subject therefore keep isolated token state, refresh locks, logout cleanup, and reauthentication behavior.
+
+Refresh persistence is modeled as a versioned compare-and-swap update of the complete session token payload. This prevents an older refresh result from overwriting a newer refresh token when token rotation is enabled.
+
+Cache keys no longer contain raw issuer, subject, or session identifiers. The package derives a stable HMAC-based session fingerprint from that metadata and uses it as the external cache key segment instead.
 
 ## Session Validation
 
@@ -616,6 +621,8 @@ In production:
 - a shared distributed cache is required for user token storage
 - `AddDistributedMemoryCache` is not sufficient for multi-instance production use
 - `HostSecurityOptions.DataProtectionKeysPath` must be configured so Data Protection keys are shared
+- `TokenCacheOptions.CacheKeyHmacSecret` must be shared across all instances
+- multi-instance deployments should replace the default session refresh lock/store implementations with shared implementations that can coordinate versioned session-state updates across nodes
 
 `AddRecrovitOpenIdConnectInfrastructure()` registers `AddDistributedMemoryCache()` as a safe default for development and simple single-instance runs. Production hosts should replace that default with a shared `IDistributedCache` backend so encrypted token-cache entries remain available across restarts and across multiple application instances.
 

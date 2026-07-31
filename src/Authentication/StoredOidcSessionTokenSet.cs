@@ -49,4 +49,14 @@ public sealed class StoredOidcSessionTokenSet
             ExpiresAtUtc = expiresAtUtc
         };
     }
+
+    internal StoredOidcSessionTokenSet Clone()
+    {
+        return new StoredOidcSessionTokenSet
+        {
+            RefreshToken = RefreshToken,
+            IdToken = IdToken,
+            ExpiresAtUtc = ExpiresAtUtc
+        };
+    }
 }

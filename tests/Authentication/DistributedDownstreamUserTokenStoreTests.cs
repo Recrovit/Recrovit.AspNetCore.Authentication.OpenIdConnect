@@ -4,6 +4,8 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Security.Cryptography;
+using System.Text;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
@@ -68,7 +70,7 @@ public sealed class DistributedDownstreamUserTokenStoreTests
             ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
         }, CancellationToken.None);
 
-        var rawValue = await distributedCache.GetStringAsync("test-cache:session:Duende:https://idp.example.com:user-123:session-123", CancellationToken.None);
+        var rawValue = await distributedCache.GetStringAsync(BuildSessionCacheKey(user), CancellationToken.None);
 
         Assert.NotNull(rawValue);
         Assert.DoesNotContain("refresh-token", rawValue, StringComparison.Ordinal);
@@ -79,7 +81,7 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     public async Task GetSessionTokenSetAsync_ReturnsNull_WhenPayloadCannotBeUnprotected()
     {
         var distributedCache = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
-        await distributedCache.SetStringAsync("test-cache:session:Duende:https://idp.example.com:user-123:session-123", "invalid-payload", CancellationToken.None);
+        await distributedCache.SetStringAsync(BuildSessionCacheKey(TestUsers.CreateAuthenticatedUser()), "invalid-payload", CancellationToken.None);
         var store = CreateStore(distributedCache);
 
         var entry = await store.GetSessionTokenSetAsync(TestUsers.CreateAuthenticatedUser(), CancellationToken.None);
@@ -91,13 +93,13 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     public async Task GetSessionTokenSetAsync_LogsWarning_WhenPayloadCannotBeUnprotected()
     {
         var distributedCache = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
-        await distributedCache.SetStringAsync("test-cache:session:Duende:https://idp.example.com:user-123:session-123", "invalid-payload", CancellationToken.None);
+        await distributedCache.SetStringAsync(BuildSessionCacheKey(TestUsers.CreateAuthenticatedUser()), "invalid-payload", CancellationToken.None);
         var logger = new ListLogger<DistributedDownstreamUserTokenStore>();
         var store = CreateStore(distributedCache, logger: logger);
 
         _ = await store.GetSessionTokenSetAsync(TestUsers.CreateAuthenticatedUser(), CancellationToken.None);
 
-        var warning = Assert.Single(logger.Entries, static entry => entry.Level == LogLevel.Warning);
+        var warning = Assert.Single(logger.Entries, static entry => entry.EventId.Name == "TokenStorePayloadInvalid");
         Assert.Equal("TokenStorePayloadInvalid", warning.EventId.Name);
         Assert.DoesNotContain("test-cache:session:", warning.Message, StringComparison.Ordinal);
     }
@@ -119,7 +121,7 @@ public sealed class DistributedDownstreamUserTokenStoreTests
             },
             CancellationToken.None);
 
-        var apiWrite = Assert.Single(distributedCache.Writes, write => write.Key.Contains(":api:", StringComparison.Ordinal));
+        var apiWrite = Assert.Single(distributedCache.Writes);
         Assert.NotNull(apiWrite.Options);
         Assert.InRange(
             apiWrite.Options.AbsoluteExpirationRelativeToNow!.Value,
@@ -146,7 +148,10 @@ public sealed class DistributedDownstreamUserTokenStoreTests
 
         Assert.Contains(
             distributedCache.Writes.Select(write => write.Key),
-            key => key.Contains("test-cache:api:Duende:https://idp.example.com:user-123:session-123:SessionValidationApi:", StringComparison.Ordinal));
+            key => key.StartsWith("test-cache:session:", StringComparison.Ordinal)
+                && !key.Contains("user-123", StringComparison.Ordinal)
+                && !key.Contains("https://idp.example.com", StringComparison.Ordinal)
+                && !key.Contains("session-123", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -328,7 +333,10 @@ public sealed class DistributedDownstreamUserTokenStoreTests
 
         Assert.Contains(
             distributedCache.Writes.Select(write => write.Key),
-            key => string.Equals("test-cache:session:Duende:https://idp.example.com:user-123:session-123", key, StringComparison.Ordinal));
+            key => key.StartsWith("test-cache:session:", StringComparison.Ordinal)
+                && !key.Contains("user-123", StringComparison.Ordinal)
+                && !key.Contains("https://idp.example.com", StringComparison.Ordinal)
+                && !key.Contains("session-123", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -392,13 +400,26 @@ public sealed class DistributedDownstreamUserTokenStoreTests
             new EphemeralDataProtectionProvider(),
             Options.Create(new TokenCacheOptions
             {
-                CacheKeyPrefix = "test-cache"
+                CacheKeyPrefix = "test-cache",
+                CacheKeyHmacSecret = "test-hmac-secret-0123456789"
             }),
             Options.Create(new ActiveOidcProviderOptions
             {
                 ProviderName = providerName
             }),
             logger ?? NullLogger<DistributedDownstreamUserTokenStore>.Instance);
+    }
+
+    private static string BuildSessionCacheKey(System.Security.Claims.ClaimsPrincipal user)
+    {
+        var subjectId = user.FindFirst("sub")?.Value ?? throw new InvalidOperationException();
+        var issuer = user.FindFirst("iss")?.Value ?? user.FindFirst("sub")?.Issuer ?? throw new InvalidOperationException();
+        var sessionId = user.FindFirst(OidcAuthenticationConstants.ProviderClaimNames.LocalSessionId)?.Value ?? throw new InvalidOperationException();
+        var payload = $"Duende\n{issuer}\n{subjectId}\n{sessionId}";
+        var hash = HMACSHA256.HashData(
+            Encoding.UTF8.GetBytes("test-hmac-secret-0123456789"),
+            Encoding.UTF8.GetBytes(payload));
+        return $"test-cache:session:{Convert.ToHexString(hash)}";
     }
 
     private sealed class RecordingDistributedCache : IDistributedCache

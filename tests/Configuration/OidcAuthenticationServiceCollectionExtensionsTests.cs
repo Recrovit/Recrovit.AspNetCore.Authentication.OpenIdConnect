@@ -573,11 +573,13 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
-        services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => new InMemoryTokenStore(new StoredOidcSessionTokenSet
+        var tokenStore = new InMemoryTokenStore(new StoredOidcSessionTokenSet
         {
             RefreshToken = "refresh-token",
             ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
-        })));
+        });
+        services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
+        services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         var handler = new CaptureRequestHandler();
         services.Replace(ServiceDescriptor.Singleton<IHttpClientFactory>(new DelegatingHttpClientFactory(handler)));
         services.Replace(ServiceDescriptor.Singleton<IOptionsMonitor<OpenIdConnectOptions>>(new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions

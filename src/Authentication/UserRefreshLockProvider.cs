@@ -4,18 +4,22 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 
-internal sealed class UserRefreshLockProvider(IOptions<ActiveOidcProviderOptions> activeProviderOptions) : IUserRefreshLockProvider
+internal sealed class UserRefreshLockProvider(
+    IOptions<ActiveOidcProviderOptions> activeProviderOptions,
+    IOptions<TokenCacheOptions> tokenCacheOptions,
+    TimeProvider timeProvider) : IUserRefreshLockProvider
 {
     private readonly object syncRoot = new();
     private readonly Dictionary<string, LockEntry> entries = new(StringComparer.Ordinal);
     private readonly UserTokenCacheKeyContextAccessor cacheKeyContextAccessor = new(activeProviderOptions);
+    private readonly TimeProvider timeProvider = timeProvider;
+    private readonly TimeSpan leaseDuration = TimeSpan.FromSeconds(tokenCacheOptions.Value.RefreshLockLeaseSeconds);
 
-    public async ValueTask<IAsyncDisposable> AcquireAsync(ClaimsPrincipal user, string downstreamApiName, CancellationToken cancellationToken)
+    public async ValueTask<IUserRefreshLockLease> AcquireAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
         var context = cacheKeyContextAccessor.GetRequiredContext(user);
-        var userKey = $"{context.Provider}:{context.Issuer}:{context.SubjectId}:{context.SessionId}:{downstreamApiName}";
+        var userKey = $"{context.Provider}:{context.Issuer}:{context.SubjectId}:{context.SessionId}";
         LockEntry? entry;
-
         lock (syncRoot)
         {
             if (!entries.TryGetValue(userKey, out entry))
@@ -29,7 +33,12 @@ internal sealed class UserRefreshLockProvider(IOptions<ActiveOidcProviderOptions
 
         ArgumentNullException.ThrowIfNull(entry);
         await entry.Semaphore.WaitAsync(cancellationToken);
-        return new Releaser(this, userKey, entry);
+        return new Releaser(
+            this,
+            userKey,
+            entry,
+            Guid.NewGuid().ToString("n"),
+            timeProvider.GetUtcNow().Add(leaseDuration));
     }
 
     private void Release(string userKey, LockEntry entry)
@@ -55,8 +64,17 @@ internal sealed class UserRefreshLockProvider(IOptions<ActiveOidcProviderOptions
         public int LeaseCount { get; set; }
     }
 
-    private sealed class Releaser(UserRefreshLockProvider owner, string userKey, LockEntry entry) : IAsyncDisposable
+    private sealed class Releaser(
+        UserRefreshLockProvider owner,
+        string userKey,
+        LockEntry entry,
+        string ownerToken,
+        DateTimeOffset expiresAtUtc) : IUserRefreshLockLease
     {
+        public string OwnerToken { get; } = ownerToken;
+
+        public DateTimeOffset ExpiresAtUtc { get; } = expiresAtUtc;
+
         public ValueTask DisposeAsync()
         {
             owner.Release(userKey, entry);

@@ -17,14 +17,16 @@ using System.Net;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Text.Encodings.Web;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
 
-internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
+internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore, IOidcSessionStateStore
 {
     private readonly Dictionary<string, StoredOidcSessionTokenSet> sessionTokenSets = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CachedDownstreamApiTokenEntry> apiTokens = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> concurrencyVersions = new(StringComparer.Ordinal);
 
     public StoredOidcSessionTokenSet? StoredSessionTokenSet { get; private set; }
 
@@ -57,7 +59,7 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
         {
             foreach (var entry in initialApiTokens)
             {
-                apiTokens[$"{CreateSessionKey(initialUser)}|{entry.Key}"] = entry.Value;
+                apiTokens[$"{CreateSessionKey(initialUser)}|{NormalizeInitialApiKey(entry.Key)}"] = entry.Value;
             }
         }
     }
@@ -68,12 +70,39 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
         return Task.FromResult(tokenSet);
     }
 
+    public Task<VersionedOidcSessionState?> GetSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+    {
+        var sessionKey = CreateSessionKey(user);
+        sessionTokenSets.TryGetValue(sessionKey, out var tokenSet);
+        var matchingApiTokens = apiTokens
+            .Where(entry => entry.Key.StartsWith($"{sessionKey}|", StringComparison.Ordinal))
+            .ToDictionary(
+                entry => entry.Key[(sessionKey.Length + 1)..],
+                entry => Clone(entry.Value),
+                StringComparer.Ordinal);
+        if (tokenSet is null && matchingApiTokens.Count == 0)
+        {
+            return Task.FromResult<VersionedOidcSessionState?>(null);
+        }
+
+        concurrencyVersions.TryGetValue(sessionKey, out var version);
+        version ??= "v0";
+        return Task.FromResult<VersionedOidcSessionState?>(new VersionedOidcSessionState(
+            version,
+            new OidcSessionState
+            {
+                SessionTokens = tokenSet is null ? null : Clone(tokenSet),
+                ApiTokens = matchingApiTokens
+            }));
+    }
+
     public Task StoreSessionTokenSetAsync(ClaimsPrincipal user, StoredOidcSessionTokenSet tokenSet, CancellationToken cancellationToken)
     {
         StoredSessionTokenSet = tokenSet;
         var sessionKey = CreateSessionKey(user);
         StoredSessionKeys.Add(sessionKey);
         sessionTokenSets[sessionKey] = tokenSet;
+        concurrencyVersions[sessionKey] = Guid.NewGuid().ToString("n");
         return Task.CompletedTask;
     }
 
@@ -87,6 +116,51 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
         return Task.FromResult(entry);
     }
 
+    public Task<bool> TryCompareAndSwapSessionStateAsync(
+        ClaimsPrincipal user,
+        string? expectedVersion,
+        OidcSessionState newState,
+        CancellationToken cancellationToken)
+    {
+        var sessionKey = CreateSessionKey(user);
+        var currentStateExists = sessionTokenSets.ContainsKey(sessionKey) || apiTokens.Keys.Any(key => key.StartsWith($"{sessionKey}|", StringComparison.Ordinal));
+        concurrencyVersions.TryGetValue(sessionKey, out var currentVersion);
+        if (!currentStateExists)
+        {
+            if (expectedVersion is not null)
+            {
+                return Task.FromResult(false);
+            }
+        }
+        else if (!string.Equals(currentVersion ?? "v0", expectedVersion, StringComparison.Ordinal))
+        {
+            return Task.FromResult(false);
+        }
+
+        if (newState.SessionTokens is null)
+        {
+            sessionTokenSets.Remove(sessionKey);
+        }
+        else
+        {
+            sessionTokenSets[sessionKey] = Clone(newState.SessionTokens);
+            StoredSessionTokenSet = Clone(newState.SessionTokens);
+        }
+
+        foreach (var apiKey in apiTokens.Keys.Where(key => key.StartsWith($"{sessionKey}|", StringComparison.Ordinal)).ToArray())
+        {
+            apiTokens.Remove(apiKey);
+        }
+
+        foreach (var entry in newState.ApiTokens)
+        {
+            apiTokens[$"{sessionKey}|{entry.Key}"] = Clone(entry.Value);
+        }
+
+        concurrencyVersions[sessionKey] = Guid.NewGuid().ToString("n");
+        return Task.FromResult(true);
+    }
+
     public Task StoreApiTokenAsync(
         ClaimsPrincipal user,
         string downstreamApiName,
@@ -95,8 +169,12 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
         CancellationToken cancellationToken)
     {
         apiTokens[CreateApiKey(user, downstreamApiName, scopes)] = tokenEntry;
+        concurrencyVersions[CreateSessionKey(user)] = Guid.NewGuid().ToString("n");
         return Task.CompletedTask;
     }
+
+    public Task DeleteSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+        => RemoveAsync(user, cancellationToken);
 
     public Task RemoveAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
@@ -104,6 +182,7 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
         var sessionKey = CreateSessionKey(user);
         RemovedSessionKeys.Add(sessionKey);
         sessionTokenSets.Remove(sessionKey);
+        concurrencyVersions.Remove(sessionKey);
         foreach (var apiKey in apiTokens.Keys.Where(key => key.StartsWith($"{sessionKey}|", StringComparison.Ordinal)).ToArray())
         {
             apiTokens.Remove(apiKey);
@@ -113,7 +192,55 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
 
     private static string CreateApiKey(ClaimsPrincipal user, string downstreamApiName, IReadOnlyCollection<string> scopes)
     {
-        return $"{CreateSessionKey(user)}|{downstreamApiName}:{string.Join(" ", scopes.OrderBy(scope => scope, StringComparer.Ordinal))}";
+        var normalizedScopes = scopes
+            .Where(scope => !string.IsNullOrWhiteSpace(scope))
+            .Select(scope => scope.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(scope => scope, StringComparer.Ordinal);
+        var serializedScopes = string.Join(" ", normalizedScopes);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(serializedScopes));
+        return $"{CreateSessionKey(user)}|{downstreamApiName}:{Convert.ToHexString(hash)}";
+    }
+
+    private static string NormalizeInitialApiKey(string key)
+    {
+        var separatorIndex = key.IndexOf(':', StringComparison.Ordinal);
+        if (separatorIndex < 0)
+        {
+            return key;
+        }
+
+        var apiName = key[..separatorIndex];
+        var suffix = key[(separatorIndex + 1)..];
+        if (suffix.Length == 64 && suffix.All(Uri.IsHexDigit))
+        {
+            return key;
+        }
+
+        var scopes = suffix.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var normalizedScopes = scopes.Length == 0 ? [suffix] : scopes;
+        var serializedScopes = string.Join(" ", normalizedScopes.OrderBy(scope => scope, StringComparer.Ordinal));
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(serializedScopes));
+        return $"{apiName}:{Convert.ToHexString(hash)}";
+    }
+
+    private static StoredOidcSessionTokenSet Clone(StoredOidcSessionTokenSet tokenSet)
+    {
+        return new StoredOidcSessionTokenSet
+        {
+            RefreshToken = tokenSet.RefreshToken,
+            IdToken = tokenSet.IdToken,
+            ExpiresAtUtc = tokenSet.ExpiresAtUtc
+        };
+    }
+
+    private static CachedDownstreamApiTokenEntry Clone(CachedDownstreamApiTokenEntry tokenEntry)
+    {
+        return new CachedDownstreamApiTokenEntry
+        {
+            AccessToken = tokenEntry.AccessToken,
+            ExpiresAtUtc = tokenEntry.ExpiresAtUtc
+        };
     }
 
     private static string CreateSessionKey(ClaimsPrincipal user)

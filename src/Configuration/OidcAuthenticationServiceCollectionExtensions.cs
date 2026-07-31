@@ -133,7 +133,10 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
         services.AddSingleton(downstreamApiCatalog);
         services.AddSingleton(scopeResolver);
-        services.AddSingleton<IUserRefreshLockProvider, UserRefreshLockProvider>();
+        services.AddSingleton<IUserRefreshLockProvider>(serviceProvider => new UserRefreshLockProvider(
+            serviceProvider.GetRequiredService<IOptions<ActiveOidcProviderOptions>>(),
+            serviceProvider.GetRequiredService<IOptions<TokenCacheOptions>>(),
+            serviceProvider.GetRequiredService<TimeProvider>()));
         services.AddSingleton<ICertificateStoreReader, WindowsCertificateStoreReader>();
         services.AddSingleton<IOidcClientCertificateLoader, OidcClientCertificateLoader>();
         services.AddSingleton<IOidcClientAssertionService, OidcPrivateKeyJwtClientAssertionService>();
@@ -145,9 +148,12 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddSingleton<ProxyEndpointMatcher>();
         services.AddScoped<IDownstreamTransportProxyClient, DownstreamTransportProxyClient>();
 
-        services.AddScoped<IDownstreamUserTokenStore, DistributedDownstreamUserTokenStore>();
+        services.AddScoped<DistributedDownstreamUserTokenStore>();
+        services.AddScoped<IDownstreamUserTokenStore>(serviceProvider => serviceProvider.GetRequiredService<DistributedDownstreamUserTokenStore>());
+        services.AddScoped<IOidcSessionStateStore>(serviceProvider => serviceProvider.GetRequiredService<DistributedDownstreamUserTokenStore>());
         services.AddScoped<IDownstreamUserTokenProvider>(serviceProvider => new OidcDownstreamUserTokenProvider(
             serviceProvider.GetRequiredService<IDownstreamUserTokenStore>(),
+            serviceProvider.GetRequiredService<IOidcSessionStateStore>(),
             serviceProvider.GetRequiredService<IUserRefreshLockProvider>(),
             serviceProvider.GetRequiredService<DownstreamApiCatalog>(),
             serviceProvider.GetRequiredService<OidcScopeResolver>(),

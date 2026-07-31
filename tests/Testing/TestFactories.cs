@@ -53,7 +53,8 @@ internal static class TestFactories
         return new TokenCacheOptions
         {
             RefreshBeforeExpirationSeconds = 60,
-            CacheKeyPrefix = "test-cache"
+            CacheKeyPrefix = "test-cache",
+            CacheKeyHmacSecret = "test-hmac-secret-0123456789"
         };
     }
 
@@ -75,6 +76,7 @@ internal static class TestFactories
             [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read"
         }), environment);
         services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
+        services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         services.Replace(ServiceDescriptor.Singleton(httpClientFactory));
         services.Replace(ServiceDescriptor.Singleton<IOptionsMonitor<OpenIdConnectOptions>>(openIdOptionsMonitor ?? new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
         {

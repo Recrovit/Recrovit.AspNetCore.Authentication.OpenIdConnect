@@ -14,4 +14,13 @@ public sealed class CachedDownstreamApiTokenEntry
     /// Gets the access token expiry in UTC.
     /// </summary>
     public DateTimeOffset ExpiresAtUtc { get; init; }
+
+    internal CachedDownstreamApiTokenEntry Clone()
+    {
+        return new CachedDownstreamApiTokenEntry
+        {
+            AccessToken = AccessToken,
+            ExpiresAtUtc = ExpiresAtUtc
+        };
+    }
 }

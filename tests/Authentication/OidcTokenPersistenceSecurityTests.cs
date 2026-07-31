@@ -87,7 +87,9 @@ public sealed class OidcTokenPersistenceSecurityTests
         var services = new ServiceCollection();
         services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(), new FakeWebHostEnvironment());
         services.RemoveAll<IDownstreamUserTokenStore>();
+        services.RemoveAll<IOidcSessionStateStore>();
         services.AddSingleton<IDownstreamUserTokenStore>(tokenStore);
+        services.AddSingleton<IOidcSessionStateStore>(tokenStore);
         return services.BuildServiceProvider();
     }
 

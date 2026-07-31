@@ -4,5 +4,12 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 
 internal interface IUserRefreshLockProvider
 {
-    ValueTask<IAsyncDisposable> AcquireAsync(ClaimsPrincipal user, string downstreamApiName, CancellationToken cancellationToken);
+    ValueTask<IUserRefreshLockLease> AcquireAsync(ClaimsPrincipal user, CancellationToken cancellationToken);
+}
+
+internal interface IUserRefreshLockLease : IAsyncDisposable
+{
+    string OwnerToken { get; }
+
+    DateTimeOffset ExpiresAtUtc { get; }
 }

@@ -51,7 +51,7 @@ public sealed class OidcAuthenticationEndpointRouteBuilderExtensionsTests
             [$"{TestConfiguration.RootSectionName}:Host:EndpointBasePath"] = endpointBasePath
         }));
         builder.AddRecrovitOpenIdConnectInfrastructure();
-        builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => new InMemoryTokenStore(
+        var tokenStore = new InMemoryTokenStore(
             authenticatedUser ?? TestUsers.CreateAuthenticatedUser(),
             authenticatedUser is null
                 ? null
@@ -59,7 +59,9 @@ public sealed class OidcAuthenticationEndpointRouteBuilderExtensionsTests
                 {
                     RefreshToken = "refresh-token",
                     ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
-                })));
+                });
+        builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
+        builder.Services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenProvider, StubDownstreamUserTokenProvider>());
 
         var app = builder.Build();

@@ -629,6 +629,7 @@ public sealed class OidcDownstreamUserTokenProviderTests
 
         services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(overrides), environment);
         services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
+        services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         services.Replace(ServiceDescriptor.Singleton(httpClientFactory));
         services.Replace(ServiceDescriptor.Singleton<IOptionsMonitor<OpenIdConnectOptions>>(openIdOptionsMonitor ?? new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
         {
