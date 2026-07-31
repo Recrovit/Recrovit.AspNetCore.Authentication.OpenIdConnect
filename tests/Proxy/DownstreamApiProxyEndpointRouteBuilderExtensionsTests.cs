@@ -919,6 +919,21 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
     }
 
     [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ThrowsForEmptyConfiguredClaimHeaderApiName()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => CreateApplicationAsync(
+            proxyClient,
+            configureEndpoints: options => options.ForApi("")));
+
+        Assert.Contains("downstream API name", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task MapDownstreamApiProxyEndpoints_ThrowsForForbiddenClaimHeaderName()
     {
         var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
@@ -932,6 +947,40 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
                 .ForwardFirstClaimHeader("Authorization", ClaimTypes.NameIdentifier)));
 
         Assert.Contains("Authorization", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ThrowsForEmptyClaimHeaderClaimType()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => CreateApplicationAsync(
+            proxyClient,
+            configureEndpoints: options => options.ForApi("GraphApi")
+                .ForwardFirstClaimHeader("X-User-Id", " ")));
+
+        Assert.Contains("claim type", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ThrowsForDuplicateClaimHeaderName()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateApplicationAsync(
+            proxyClient,
+            configureEndpoints: options => options.ForApi("GraphApi")
+                .ForwardFirstClaimHeader("X-User-Id", ClaimTypes.NameIdentifier)
+                .ForwardClaimValuesHeader("x-user-id", ClaimTypes.Role)));
+
+        Assert.Contains("duplicate", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("X-User-Id", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     public static IEnumerable<object[]> GetInvalidProxyHttpRequestPaths()

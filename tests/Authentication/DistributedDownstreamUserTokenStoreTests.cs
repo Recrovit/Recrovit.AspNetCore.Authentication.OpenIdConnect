@@ -153,6 +153,28 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     }
 
     [Fact]
+    public async Task GetSessionTokenSetAsync_DoesNotReadLegacyRawKeySessionPayload()
+    {
+        var distributedCache = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
+        var user = TestUsers.CreateAuthenticatedUser();
+        var legacyRawKey = BuildLegacyRawSessionCacheKey(user);
+        await distributedCache.SetStringAsync(
+            legacyRawKey,
+            """{"version":"v1","tokenSet":{"refreshToken":"legacy-refresh","idToken":"legacy-id","expiresAtUtc":"2030-01-01T00:00:00Z"}}""",
+            CancellationToken.None);
+        var store = CreateStore(distributedCache);
+
+        var entry = await store.GetSessionTokenSetAsync(user, CancellationToken.None);
+        var newSessionCacheKey = BuildSessionCacheKey(user);
+
+        Assert.Null(entry);
+        Assert.NotEqual(legacyRawKey, newSessionCacheKey);
+        Assert.DoesNotContain("user-123", newSessionCacheKey, StringComparison.Ordinal);
+        Assert.DoesNotContain("https://idp.example.com", newSessionCacheKey, StringComparison.Ordinal);
+        Assert.DoesNotContain("session-123", newSessionCacheKey, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GetSessionTokenSetAsync_ReturnsNull_WhenPayloadCannotBeUnprotected()
     {
         var distributedCache = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
@@ -555,6 +577,14 @@ public sealed class DistributedDownstreamUserTokenStoreTests
             Encoding.UTF8.GetBytes("test-hmac-secret-0123456789"),
             Encoding.UTF8.GetBytes(payload));
         return $"test-cache:session:{Convert.ToHexString(hash)}";
+    }
+
+    private static string BuildLegacyRawSessionCacheKey(System.Security.Claims.ClaimsPrincipal user)
+    {
+        var subjectId = user.FindFirst("sub")?.Value ?? throw new InvalidOperationException();
+        var issuer = user.FindFirst("iss")?.Value ?? user.FindFirst("sub")?.Issuer ?? throw new InvalidOperationException();
+        var sessionId = user.FindFirst(OidcAuthenticationConstants.ProviderClaimNames.LocalSessionId)?.Value ?? throw new InvalidOperationException();
+        return $"test-cache:session:Duende:{issuer}:{subjectId}:{sessionId}";
     }
 
     private sealed class RecordingDistributedCache : IDistributedCache

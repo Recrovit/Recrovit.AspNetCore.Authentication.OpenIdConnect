@@ -174,6 +174,17 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     [Fact]
+    public void PublicConstructor_ThrowsClearError_WhenCustomTokenStoreDoesNotImplementSessionStateStore()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => CreateDirectProvider(
+            new UserTokenStoreWithoutSessionState(),
+            new StubHttpClientFactory("{}")));
+
+        Assert.Contains(nameof(IDownstreamUserTokenStore), ex.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(IOidcSessionStateStore), ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GetAccessTokenAsync_UsesClientAssertion_WhenConfiguredForPrivateKeyJwt()
     {
         using var certificate = TestCertificates.CreateTemporaryPfx();
@@ -1007,7 +1018,7 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     private static OidcDownstreamUserTokenProvider CreateDirectProvider(
-        InMemoryTokenStore tokenStore,
+        IDownstreamUserTokenStore tokenStore,
         IHttpClientFactory httpClientFactory,
         OidcProviderOptions? oidcOptions = null,
         IOidcClientAssertionService? clientAssertionService = null,
@@ -1267,5 +1278,32 @@ public sealed class OidcDownstreamUserTokenProviderTests
                 LastRefreshUtc = source.LastRefreshUtc
             };
         }
+    }
+
+    private sealed class UserTokenStoreWithoutSessionState : IDownstreamUserTokenStore
+    {
+        public Task<StoredOidcSessionTokenSet?> GetSessionTokenSetAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+            => Task.FromResult<StoredOidcSessionTokenSet?>(null);
+
+        public Task StoreSessionTokenSetAsync(ClaimsPrincipal user, StoredOidcSessionTokenSet tokenSet, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+
+        public Task<CachedDownstreamApiTokenEntry?> GetApiTokenAsync(
+            ClaimsPrincipal user,
+            string downstreamApiName,
+            IReadOnlyCollection<string> scopes,
+            CancellationToken cancellationToken)
+            => Task.FromResult<CachedDownstreamApiTokenEntry?>(null);
+
+        public Task StoreApiTokenAsync(
+            ClaimsPrincipal user,
+            string downstreamApiName,
+            IReadOnlyCollection<string> scopes,
+            CachedDownstreamApiTokenEntry tokenEntry,
+            CancellationToken cancellationToken)
+            => Task.CompletedTask;
+
+        public Task RemoveAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+            => Task.CompletedTask;
     }
 }

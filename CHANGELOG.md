@@ -33,7 +33,7 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 
 - Hardened downstream proxy request protection
   - Expanded proxy browser-origin protection from `GET`-only to the full generic proxy surface, including unsafe HTTP methods and WebSocket handshakes.
-  - Renamed `DownstreamProxyGetProtection` to `DownstreamProxyRequestProtection` and replaced GET-specific option types with request-wide equivalents.
+  - Added `DownstreamProxyRequestProtection` host options for request-wide proxy origin and antiforgery policy.
   - Required valid antiforgery tokens for cookie-authenticated unsafe proxy methods after origin policy acceptance.
   - Added strict WebSocket `Origin` validation with explicit allowlists, `null` rejection, and opt-in support for missing `Origin` on non-browser clients.
 
@@ -55,16 +55,25 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 ### Breaking Changes
 
 - Downstream proxy request protection configuration
-  - Renamed `Recrovit:OpenIdConnect:Host:DownstreamProxyGetProtection` to `DownstreamProxyRequestProtection`.
-  - Replaced the GET-specific options and enum types with request-wide equivalents: `DownstreamProxyRequestProtectionOptions` and `ProxyRequestProtectionMode`.
+  - Added `Recrovit:OpenIdConnect:Host:DownstreamProxyRequestProtection` as the 10.2.0 host option for generic downstream proxy request protection.
   - Tightened the default generic proxy policy so hosts that relied on the previous GET-only protection behavior must update frontend request handling and configuration for unsafe HTTP methods and WebSocket handshakes.
+- Downstream proxy path resolution
+  - Pinned proxy targets to the configured downstream origin and effective `BaseUrl + RelativePath` root.
+  - Requests that previously relied on escaping the configured root, path replacement from a path-bearing `BaseUrl`, absolute or scheme-relative paths, dot-segment traversal, or multi-pass encoded traversal are now rejected with `400 Bad Request`.
 - Downstream proxy header forwarding defaults
   - Removed the previous implicit forwarding behavior, including the client-controlled `rgf-*` wildcard.
   - Changed the default downstream proxy request forwarding policy to a built-in cache/content-negotiation header set with per-API extension and explicit opt-out support through `IncludeDefaultForwardedRequestHeaders`.
   - Clarified that CORS and host-security response policy remains host-owned; downstream response headers in those categories are always suppressed.
 - Token-state extensibility
+  - Custom `IDownstreamUserTokenStore` implementations used with `OidcDownstreamUserTokenProvider` must also implement `IOidcSessionStateStore`, including single-instance hosts that instantiate the token provider directly.
   - Custom token-state stores used for multi-instance deployments must implement `IOidcSessionStateStore` with atomic cross-node compare-and-swap semantics.
   - Process-local session lock interfaces are internal implementation details and are not part of the public package API.
+- Public API compatibility
+  - `DownstreamApiCatalog.Create(IConfigurationSection)` was replaced by `DownstreamApiCatalog.Create(IConfigurationSection, IConfigurationSection?)`. Source code using the one-argument call continues to compile because the second parameter is optional, but binaries compiled against 10.1.0 should be rebuilt against 10.2.0.
+- Default token-cache representation
+  - The default distributed token store changed from separate `v1` session/API-token payloads to one encrypted `v2` session aggregate.
+  - Default cache keys changed from raw provider, issuer, subject, and session-id segments to HMAC-derived session fingerprints.
+  - Existing active cache entries written by earlier package versions are not read as 10.2.0 session state; affected users should reauthenticate so token state can be rebuilt.
 
 
 ## [10.1.0] - 2026-07-10

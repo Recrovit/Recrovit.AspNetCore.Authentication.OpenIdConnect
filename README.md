@@ -114,6 +114,7 @@ Key responsibilities:
 - defines the base path for the built-in authentication endpoints
 - defines the safe redirect path used when a handled OIDC remote callback failure returns to the host
 - optionally names a downstream API that should be used to validate whether the current session is still usable
+- defines the browser-origin and antiforgery protection policy for generic downstream proxy requests through `DownstreamProxyRequestProtection`
 
 ### `Recrovit:OpenIdConnect:Provider`
 
@@ -143,7 +144,9 @@ Each downstream API definition describes:
 - `Scopes`
 - `ForwardedRequestHeaders`
 - `ForwardedResponseHeaders`
+- `IncludeDefaultForwardedRequestHeaders`
 - `RelativePath`
+- `Disabled`
 
 The catalog is used both for validation and for runtime token access.
 
@@ -250,9 +253,11 @@ With this configuration:
 
 For example, if `BaseUrl` is `https://api.example.com/gateway` and `RelativePath` is `session/check`, the effective downstream root is `https://api.example.com/gateway/session/check`. Proxy route suffixes are appended under that root, and traversal-style inputs that would resolve outside it are rejected before any outbound request is created.
 
+Upgrade note for 10.2.0: downstream proxy path validation is stricter than earlier versions. The proxy route suffix cannot escape the effective `BaseUrl + RelativePath` root, and absolute paths, scheme-relative paths, dot-segment traversal, malformed percent-encoding, and multi-pass encoded traversal are rejected with `400 Bad Request`.
+
 ### Downstream Proxy Request Protection
 
-The host options include `Recrovit:OpenIdConnect:Host:DownstreamProxyRequestProtection` for the generic downstream proxy surface.
+Starting with 10.2.0, the host options include `Recrovit:OpenIdConnect:Host:DownstreamProxyRequestProtection` for the generic downstream proxy surface.
 
 Default behavior:
 
@@ -729,6 +734,8 @@ When the OIDC sign-in ticket is received, the package stores the OIDC session to
 
 The default distributed token store encrypts a single versioned session payload with ASP.NET Core Data Protection before writing it to the cache backend. That payload contains the session refresh token, ID token, and any cached per-API access tokens for the authenticated local session.
 
+Starting with 10.2.0, the default cache representation uses a `v2` session aggregate and HMAC-derived session cache keys. Cache entries written by earlier package versions used a different payload shape and raw issuer, subject, and session-id key segments, so existing active token-cache entries are not treated as reusable 10.2.0 state. During upgrade, expect affected users to rebuild token state through normal reauthentication.
+
 After storage, the package removes the tokens from the authentication properties before they remain in the authentication cookie. In practice, this means the host keeps the sign-in cookie for local session state, while session tokens and downstream API access tokens are retained separately and scoped to that specific local authenticated session.
 
 The local cookie session uses an explicit timeout model:
@@ -768,6 +775,12 @@ Refresh persistence is modeled as a versioned compare-and-swap update of the com
 Cache keys no longer contain raw issuer, subject, or session identifiers. The package derives a stable HMAC-based session fingerprint from that metadata and uses it as the external cache key segment instead.
 
 The built-in `DistributedDownstreamUserTokenStore` and `UserRefreshLockProvider` are intended as safe defaults for development and single-instance hosts. The in-process `UserRefreshLockProvider` relies on `SemaphoreSlim` ownership and therefore does not expire its local lease by time. These defaults do not by themselves provide production-safe cross-node compare-and-swap or cross-node refresh lease guarantees.
+
+### Custom Token Stores
+
+Starting with 10.2.0, custom token stores used with `OidcDownstreamUserTokenProvider` must implement both `IDownstreamUserTokenStore` and `IOidcSessionStateStore`. This applies even for single-instance hosts when the token provider is instantiated directly, because refresh persistence now works against a complete versioned session aggregate.
+
+For multi-instance deployments, the `IOidcSessionStateStore.TryCompareAndSwapSessionStateAsync(...)` implementation must provide atomic compare-and-swap semantics across nodes. A best-effort read-then-write sequence over a shared cache is not sufficient for refresh-token rotation safety.
 
 ## Session Validation
 
@@ -876,7 +889,7 @@ Production checklist:
 
 `AddRecrovitOpenIdConnectInfrastructure()` registers `AddDistributedMemoryCache()` as a safe default for development and simple single-instance runs. Production hosts should replace it so encrypted token-cache entries remain available across restarts and across multiple application instances.
 
-`TokenCacheOptions.DeploymentMode` defaults to `SingleInstance`. If it is set to `MultiInstance`, startup fails fast unless the host replaces both the default in-process `IOidcSessionRefreshLockProvider` and the default non-atomic `IOidcSessionStateStore`.
+`TokenCacheOptions.DeploymentMode` defaults to `SingleInstance`. If it is set to `MultiInstance`, startup fails fast unless the host replaces both the default in-process `IOidcSessionRefreshLockProvider` and the default non-atomic `IOidcSessionStateStore`. See the custom token store requirements above for the baseline `IOidcSessionStateStore` contract that applies before the extra multi-instance atomicity requirement.
 
 When `DataProtectionSecurityProfile` is set to `Hardened`, production startup also requires explicit Data Protection application isolation through `SetApplicationName(...)` and key-ring encryption when an explicit repository is configured.
 

@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -275,6 +276,89 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
             .CreateClient("Recrovit.OpenIdConnect.TokenEndpoint");
 
         Assert.Equal(TimeSpan.FromSeconds(42), client.Timeout);
+    }
+
+    [Fact]
+    public async Task AddOidcAuthenticationInfrastructure_ConfiguredHttpClientsDoNotFollowRedirectsOrStoreCookies()
+    {
+        Uri? serverBaseAddress = null;
+        await using var server = await LoopbackHttpServer.StartAsync((request, _) =>
+        {
+            if (string.Equals(request.Path, "/redirect-source", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new LoopbackHttpResponse(
+                    HttpStatusCode.Found,
+                    ResponseHeaders: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Location"] = new Uri(serverBaseAddress!, "/redirect-target").AbsoluteUri,
+                        ["Set-Cookie"] = "session=redirect; Path=/"
+                    }));
+            }
+
+            if (string.Equals(request.Path, "/cookie-source", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new LoopbackHttpResponse(
+                    HttpStatusCode.OK,
+                    ResponseHeaders: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Set-Cookie"] = "session=stored; Path=/"
+                    }));
+            }
+
+            return Task.FromResult(new LoopbackHttpResponse(HttpStatusCode.OK));
+        });
+        serverBaseAddress = server.BaseAddress;
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = server.BaseAddress.AbsoluteUri,
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid"
+        }), new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var tokenEndpointClient = serviceProvider.GetRequiredService<IHttpClientFactory>()
+            .CreateClient("Recrovit.OpenIdConnect.TokenEndpoint");
+        using var tokenRedirectResponse = await tokenEndpointClient.GetAsync(new Uri(server.BaseAddress, "/redirect-source"), TestContext.Current.CancellationToken);
+        using var tokenCookieSourceResponse = await tokenEndpointClient.GetAsync(new Uri(server.BaseAddress, "/cookie-source"), TestContext.Current.CancellationToken);
+        using var tokenCookieCheckResponse = await tokenEndpointClient.GetAsync(new Uri(server.BaseAddress, "/cookie-check"), TestContext.Current.CancellationToken);
+
+        using var scope = serviceProvider.CreateScope();
+        var downstreamProxyClient = scope.ServiceProvider.GetRequiredService<IDownstreamHttpProxyClient>();
+        using var downstreamRedirectResponse = await downstreamProxyClient.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/redirect-source",
+            user: null,
+            content: null,
+            headers: [],
+            TestContext.Current.CancellationToken);
+        using var downstreamCookieSourceResponse = await downstreamProxyClient.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/cookie-source",
+            user: null,
+            content: null,
+            headers: [],
+            TestContext.Current.CancellationToken);
+        using var downstreamCookieCheckResponse = await downstreamProxyClient.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/cookie-check",
+            user: null,
+            content: null,
+            headers: [],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Found, tokenRedirectResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.Found, downstreamRedirectResponse.StatusCode);
+
+        var requests = server.Requests.ToArray();
+        Assert.DoesNotContain(requests, static request => string.Equals(request.Path, "/redirect-target", StringComparison.Ordinal));
+        Assert.DoesNotContain(requests, static request =>
+            string.Equals(request.Path, "/cookie-check", StringComparison.Ordinal) &&
+            request.Headers.ContainsKey("Cookie"));
     }
 
     [Fact]
