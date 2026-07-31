@@ -13,6 +13,15 @@ public interface IOidcSessionStateStore
     Task<VersionedOidcSessionState?> GetSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Gets the complete state while the caller owns the process-local session lock.
+    /// </summary>
+    Task<VersionedOidcSessionState?> GetSessionStateAsync(
+        ClaimsPrincipal user,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+        => GetSessionStateAsync(user, cancellationToken);
+
+    /// <summary>
     /// Attempts to replace the complete stored token state when the stored concurrency version matches the expected value.
     /// </summary>
     /// <remarks>
@@ -26,7 +35,27 @@ public interface IOidcSessionStateStore
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Attempts the compare-and-swap update while the caller owns the process-local session lock.
+    /// </summary>
+    Task<bool> TryCompareAndSwapSessionStateAsync(
+        ClaimsPrincipal user,
+        string? expectedVersion,
+        OidcSessionState newState,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+        => TryCompareAndSwapSessionStateAsync(user, expectedVersion, newState, cancellationToken);
+
+    /// <summary>
     /// Deletes the complete stored token state for the specified authenticated session.
     /// </summary>
     Task DeleteSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes the complete state while the caller owns the process-local session lock.
+    /// </summary>
+    Task DeleteSessionStateAsync(
+        ClaimsPrincipal user,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+        => DeleteSessionStateAsync(user, cancellationToken);
 }

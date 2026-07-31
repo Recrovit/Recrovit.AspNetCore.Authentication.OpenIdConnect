@@ -34,6 +34,10 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Uses `Sec-Fetch-Site` as the primary signal and can fall back to a same-origin `Origin` header or a configured custom request header when Fetch Metadata is unavailable.
   - Rejects blocked proxy `GET` requests with `403 Forbidden` before any outbound downstream request is created.
 - Session token refresh concurrency and cache hardening
+  - Added public `ILocalOidcSessionCoordinator` and `ILocalOidcSessionLockLease` contracts with a singleton process-local implementation shared by scoped token stores.
+  - Serialized sign-in persistence, API-token writes, refresh rotation, logout, cleanup, and corrupted-cache deletion through one session-scoped local lock.
+  - Ordered logout and cleanup so token state is removed before the local cookie is cleared, while preventing refresh persistence from running concurrently for the same session.
+  - Prevented compare-and-swap retries from recreating a session aggregate after logout or persisting a refresh result produced from an obsolete rotated refresh token.
   - Reworked stored token persistence around a single versioned session payload so refresh token rotation and downstream API token updates are coordinated through compare-and-swap writes.
   - Changed refresh coordination from per-API in-process locking to session-scoped locking with lease metadata, and wired the provider refresh flow to re-read and retry on concurrent state changes.
   - Added `TokenCacheOptions.DeploymentMode` with `SingleInstance` default behavior and `MultiInstance` fail-fast startup validation when the host keeps the default single-node refresh lock or default non-atomic session-state store.

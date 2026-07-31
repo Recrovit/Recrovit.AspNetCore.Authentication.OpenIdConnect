@@ -24,6 +24,16 @@ public interface IDownstreamUserTokenStore
     Task StoreSessionTokenSetAsync(ClaimsPrincipal user, StoredOidcSessionTokenSet tokenSet, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Stores the OIDC session token set while the caller owns the process-local session lock.
+    /// </summary>
+    Task StoreSessionTokenSetAsync(
+        ClaimsPrincipal user,
+        StoredOidcSessionTokenSet tokenSet,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+        => StoreSessionTokenSetAsync(user, tokenSet, cancellationToken);
+
+    /// <summary>
     /// Gets the cached downstream API access token for the specified authenticated session and API.
     /// </summary>
     /// <param name="user">The authenticated session principal whose token entry should be retrieved.</param>
@@ -53,9 +63,30 @@ public interface IDownstreamUserTokenStore
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Stores a downstream API token while the caller owns the process-local session lock.
+    /// </summary>
+    Task StoreApiTokenAsync(
+        ClaimsPrincipal user,
+        string downstreamApiName,
+        IReadOnlyCollection<string> scopes,
+        CachedDownstreamApiTokenEntry tokenEntry,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+        => StoreApiTokenAsync(user, downstreamApiName, scopes, tokenEntry, cancellationToken);
+
+    /// <summary>
     /// Removes the stored encrypted token data for the specified authenticated session.
     /// </summary>
     /// <param name="user">The authenticated session principal whose token entry should be removed.</param>
     /// <param name="cancellationToken">The cancellation token for the asynchronous operation.</param>
     Task RemoveAsync(ClaimsPrincipal user, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes all token state while the caller owns the process-local session lock.
+    /// </summary>
+    Task RemoveAsync(
+        ClaimsPrincipal user,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+        => RemoveAsync(user, cancellationToken);
 }

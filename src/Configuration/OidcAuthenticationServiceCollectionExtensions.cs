@@ -156,6 +156,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
         services.AddSingleton(downstreamApiCatalog);
         services.AddSingleton(scopeResolver);
+        services.TryAddSingleton<ILocalOidcSessionCoordinator, LocalOidcSessionCoordinator>();
         services.AddSingleton<IOidcSessionRefreshLockProvider>(serviceProvider => new UserRefreshLockProvider(
             serviceProvider.GetRequiredService<IOptions<ActiveOidcProviderOptions>>()));
         services.AddSingleton<ICertificateStoreReader, WindowsCertificateStoreReader>();
@@ -177,6 +178,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
             serviceProvider.GetRequiredService<IDownstreamUserTokenStore>(),
             serviceProvider.GetRequiredService<IOidcSessionStateStore>(),
             serviceProvider.GetRequiredService<IOidcSessionRefreshLockProvider>(),
+            serviceProvider.GetRequiredService<ILocalOidcSessionCoordinator>(),
             serviceProvider.GetRequiredService<DownstreamApiCatalog>(),
             serviceProvider.GetRequiredService<OidcScopeResolver>(),
             serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>(),
@@ -345,6 +347,8 @@ public static class OidcAuthenticationServiceCollectionExtensions
                     OnTicketReceived = async context =>
                     {
                         var tokenStore = context.HttpContext.RequestServices.GetRequiredService<IDownstreamUserTokenStore>();
+                        var localSessionCoordinator = context.HttpContext.RequestServices
+                            .GetRequiredService<ILocalOidcSessionCoordinator>();
                         var ticketLogger = context.HttpContext.RequestServices
                             .GetRequiredService<ILoggerFactory>()
                             .CreateLogger("Recrovit.AspNetCore.Authentication.OpenIdConnect.Ticket");
@@ -364,9 +368,13 @@ public static class OidcAuthenticationServiceCollectionExtensions
                         var timeProvider = context.HttpContext.RequestServices.GetRequiredService<TimeProvider>();
                         EnsureLocalSessionIdClaim(principal);
                         OidcSessionTimeoutMetadata.StampSessionLifetime(principal, hostOptions, timeProvider);
+                        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(
+                            principal,
+                            context.HttpContext.RequestAborted);
                         await tokenStore.StoreSessionTokenSetAsync(
                             principal,
                             StoredOidcSessionTokenSet.FromAuthenticationProperties(authenticationProperties, timeProvider),
+                            localSessionLock,
                             context.HttpContext.RequestAborted);
                         OidcInfrastructureLog.SessionTokenPersisted(ticketLogger, activeProviderName);
 

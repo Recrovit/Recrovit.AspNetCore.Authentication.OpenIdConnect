@@ -34,6 +34,8 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore, IOidcSessi
 
     public bool RemoveCalled { get; private set; }
 
+    public long? RemoveSequence { get; private set; }
+
     public List<string> RemovedSessionKeys { get; } = [];
 
     public List<string> StoredSessionKeys { get; } = [];
@@ -179,6 +181,7 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore, IOidcSessi
     public Task RemoveAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
         RemoveCalled = true;
+        RemoveSequence = TestOperationSequence.Next();
         var sessionKey = CreateSessionKey(user);
         RemovedSessionKeys.Add(sessionKey);
         sessionTokenSets.Remove(sessionKey);
@@ -556,10 +559,22 @@ internal sealed class SignOutRecorder
             scheme,
             properties?.RedirectUri,
             properties?.Items.ToDictionary(static pair => pair.Key, static pair => (string?)pair.Value)
-                ?? new Dictionary<string, string?>()));
+                ?? new Dictionary<string, string?>(),
+            TestOperationSequence.Next()));
     }
 
-    internal sealed record SignOutCall(string Scheme, string? RedirectUri, IReadOnlyDictionary<string, string?> Items);
+    internal sealed record SignOutCall(
+        string Scheme,
+        string? RedirectUri,
+        IReadOnlyDictionary<string, string?> Items,
+        long Sequence);
+}
+
+internal static class TestOperationSequence
+{
+    private static long sequence;
+
+    public static long Next() => Interlocked.Increment(ref sequence);
 }
 
 internal sealed class RecordingAuthenticationService(

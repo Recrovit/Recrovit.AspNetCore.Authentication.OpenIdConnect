@@ -119,12 +119,13 @@ public sealed class OidcTokenPersistenceSecurityTests
     {
         if (includeSessionId)
         {
-            return TestUsers.CreateAuthenticatedUser([new Claim("sub", "user-123")]);
+            return TestUsers.CreateAuthenticatedUser();
         }
 
         return new ClaimsPrincipal(new ClaimsIdentity(
         [
-            new Claim("sub", "user-123")
+            new Claim("sub", "user-123", ClaimValueTypes.String, "https://idp.example.com"),
+            new Claim("iss", "https://idp.example.com")
         ], "test"));
     }
 

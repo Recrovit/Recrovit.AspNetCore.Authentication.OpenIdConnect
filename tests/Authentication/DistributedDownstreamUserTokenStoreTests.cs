@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -15,6 +16,42 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Authentication;
 
 public sealed class DistributedDownstreamUserTokenStoreTests
 {
+    [Fact]
+    public async Task StoreOperations_AreSerializedAcrossStoreInstancesForSameSession()
+    {
+        using var serviceProvider = CreateCoordinatorServiceProvider();
+        var coordinator = serviceProvider.GetRequiredService<ILocalOidcSessionCoordinator>();
+        var distributedCache = new BlockingSetDistributedCache();
+        var dataProtectionProvider = new EphemeralDataProtectionProvider();
+        var firstStore = CreateStore(distributedCache, coordinator: coordinator, dataProtectionProvider: dataProtectionProvider);
+        var secondStore = CreateStore(distributedCache, coordinator: coordinator, dataProtectionProvider: dataProtectionProvider);
+        var user = TestUsers.CreateAuthenticatedUser();
+
+        var sessionWrite = firstStore.StoreSessionTokenSetAsync(user, new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+        }, TestContext.Current.CancellationToken);
+        await distributedCache.FirstSetStarted;
+
+        var apiWrite = secondStore.StoreApiTokenAsync(user, "SessionValidationApi", ["openid"], new CachedDownstreamApiTokenEntry
+        {
+            AccessToken = "access-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+        }, TestContext.Current.CancellationToken);
+
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.False(apiWrite.IsCompleted);
+
+        distributedCache.ReleaseFirstSet();
+        await Task.WhenAll(sessionWrite, apiWrite);
+
+        Assert.Equal("refresh-token", (await firstStore.GetSessionTokenSetAsync(user, TestContext.Current.CancellationToken))!.RefreshToken);
+        Assert.Equal(
+            "access-token",
+            (await firstStore.GetApiTokenAsync(user, "SessionValidationApi", ["openid"], TestContext.Current.CancellationToken))!.AccessToken);
+    }
+
     [Fact]
     public async Task StoreSessionTokenSetAsync_RoundTripsEntriesBySession()
     {
@@ -116,6 +153,28 @@ public sealed class DistributedDownstreamUserTokenStoreTests
         var entry = await store.GetSessionTokenSetAsync(TestUsers.CreateAuthenticatedUser(), CancellationToken.None);
 
         Assert.Null(entry);
+        Assert.Equal(1, distributedCache.RemoveAsyncCallCount);
+    }
+
+    [Fact]
+    public async Task GetSessionTokenSetAsync_WaitsForSessionLockBeforeRemovingCorruptedPayload()
+    {
+        using var serviceProvider = CreateCoordinatorServiceProvider();
+        var coordinator = serviceProvider.GetRequiredService<ILocalOidcSessionCoordinator>();
+        var distributedCache = new RecordingDistributedCache { StoredValue = "invalid-payload" };
+        var store = CreateStore(distributedCache, coordinator: coordinator);
+        var user = TestUsers.CreateAuthenticatedUser();
+        var currentOwner = await coordinator.AcquireAsync(user, TestContext.Current.CancellationToken);
+
+        var read = store.GetSessionTokenSetAsync(user, TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+
+        Assert.False(read.IsCompleted);
+        Assert.Equal(0, distributedCache.RemoveAsyncCallCount);
+
+        await currentOwner.DisposeAsync();
+
+        Assert.Null(await read);
         Assert.Equal(1, distributedCache.RemoveAsyncCallCount);
     }
 
@@ -408,22 +467,44 @@ public sealed class DistributedDownstreamUserTokenStoreTests
         IDistributedCache distributedCache,
         string providerName = "Duende",
         ILogger<DistributedDownstreamUserTokenStore>? logger = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ILocalOidcSessionCoordinator? coordinator = null,
+        IDataProtectionProvider? dataProtectionProvider = null)
     {
-        return new DistributedDownstreamUserTokenStore(
+        var activeProviderOptions = Options.Create(new ActiveOidcProviderOptions
+        {
+            ProviderName = providerName
+        });
+        var tokenCacheOptions = Options.Create(new TokenCacheOptions
+        {
+            CacheKeyPrefix = "test-cache",
+            CacheKeyHmacSecret = "test-hmac-secret-0123456789"
+        });
+
+        return coordinator is null
+            ? new DistributedDownstreamUserTokenStore(
             distributedCache,
-            new EphemeralDataProtectionProvider(),
-            Options.Create(new TokenCacheOptions
-            {
-                CacheKeyPrefix = "test-cache",
-                CacheKeyHmacSecret = "test-hmac-secret-0123456789"
-            }),
-            Options.Create(new ActiveOidcProviderOptions
-            {
-                ProviderName = providerName
-            }),
+            dataProtectionProvider ?? new EphemeralDataProtectionProvider(),
+            tokenCacheOptions,
+            activeProviderOptions,
             logger ?? NullLogger<DistributedDownstreamUserTokenStore>.Instance,
-            timeProvider ?? TimeProvider.System);
+            timeProvider ?? TimeProvider.System)
+            : new DistributedDownstreamUserTokenStore(
+                distributedCache,
+                dataProtectionProvider ?? new EphemeralDataProtectionProvider(),
+                tokenCacheOptions,
+                activeProviderOptions,
+                logger ?? NullLogger<DistributedDownstreamUserTokenStore>.Instance,
+                coordinator,
+                timeProvider ?? TimeProvider.System);
+    }
+
+    private static ServiceProvider CreateCoordinatorServiceProvider()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(), new FakeWebHostEnvironment());
+        return services.BuildServiceProvider();
     }
 
     private static string BuildSessionCacheKey(System.Security.Claims.ClaimsPrincipal user)
@@ -475,6 +556,47 @@ public sealed class DistributedDownstreamUserTokenStoreTests
         {
             Writes.Add((key, options));
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class BlockingSetDistributedCache : IDistributedCache
+    {
+        private readonly MemoryDistributedCache inner = new(Options.Create(new MemoryDistributedCacheOptions()));
+        private readonly TaskCompletionSource firstSetStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource releaseFirstSet = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int setCount;
+
+        public Task FirstSetStarted => firstSetStarted.Task;
+
+        public void ReleaseFirstSet() => releaseFirstSet.TrySetResult();
+
+        public byte[]? Get(string key) => inner.Get(key);
+
+        public Task<byte[]?> GetAsync(string key, CancellationToken token = default) => inner.GetAsync(key, token);
+
+        public void Refresh(string key) => inner.Refresh(key);
+
+        public Task RefreshAsync(string key, CancellationToken token = default) => inner.RefreshAsync(key, token);
+
+        public void Remove(string key) => inner.Remove(key);
+
+        public Task RemoveAsync(string key, CancellationToken token = default) => inner.RemoveAsync(key, token);
+
+        public void Set(string key, byte[] value, DistributedCacheEntryOptions options) => inner.Set(key, value, options);
+
+        public async Task SetAsync(
+            string key,
+            byte[] value,
+            DistributedCacheEntryOptions options,
+            CancellationToken token = default)
+        {
+            if (Interlocked.Increment(ref setCount) == 1)
+            {
+                firstSetStarted.TrySetResult();
+                await releaseFirstSet.Task.WaitAsync(token);
+            }
+
+            await inner.SetAsync(key, value, options, token);
         }
     }
 }

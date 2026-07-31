@@ -119,6 +119,7 @@ public static class AuthenticationEndpoints
         HttpContext httpContext,
         IAntiforgery antiforgery,
         IDownstreamUserTokenStore tokenStore,
+        ILocalOidcSessionCoordinator localSessionCoordinator,
         string? returnUrl,
         ILoggerFactory loggerFactory)
     {
@@ -139,19 +140,29 @@ public static class AuthenticationEndpoints
             return TypedResults.BadRequest();
         }
 
-        if (httpContext.User.Identity?.IsAuthenticated is true)
-        {
-            await tokenStore.RemoveAsync(httpContext.User, httpContext.RequestAborted);
-        }
-
         var safeReturnUrl = SanitizeReturnUrl(returnUrl);
-        OidcEndpointLog.LogoutCompleted(logger, "/logout", "signout-issued");
-        return TypedResults.SignOut(
+        var signOutResult = TypedResults.SignOut(
             new AuthenticationProperties
             {
                 RedirectUri = safeReturnUrl
             },
             [CookieAuthenticationDefaults.AuthenticationScheme, OpenIdConnectDefaults.AuthenticationScheme]);
+
+        if (httpContext.User.Identity?.IsAuthenticated is true)
+        {
+            await using var localSessionLock = await localSessionCoordinator.AcquireAsync(
+                httpContext.User,
+                httpContext.RequestAborted);
+            await tokenStore.RemoveAsync(httpContext.User, localSessionLock, httpContext.RequestAborted);
+            await signOutResult.ExecuteAsync(httpContext);
+        }
+        else
+        {
+            await signOutResult.ExecuteAsync(httpContext);
+        }
+
+        OidcEndpointLog.LogoutCompleted(logger, "/logout", "signout-issued");
+        return TypedResults.Empty;
     }
 
     internal static async Task<bool> TryEnsureAuthenticatedSessionAsync(

@@ -352,8 +352,18 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
 
         using var serviceProvider = services.BuildServiceProvider();
+        using var firstScope = serviceProvider.CreateScope();
+        using var secondScope = serviceProvider.CreateScope();
 
-        Assert.NotNull(serviceProvider.GetService<IDownstreamUserTokenStore>());
+        var firstTokenStore = firstScope.ServiceProvider.GetRequiredService<IDownstreamUserTokenStore>();
+        var firstStateStore = firstScope.ServiceProvider.GetRequiredService<IOidcSessionStateStore>();
+        var secondTokenStore = secondScope.ServiceProvider.GetRequiredService<IDownstreamUserTokenStore>();
+
+        Assert.Same(firstTokenStore, firstStateStore);
+        Assert.NotSame(firstTokenStore, secondTokenStore);
+        Assert.Same(
+            firstScope.ServiceProvider.GetRequiredService<ILocalOidcSessionCoordinator>(),
+            secondScope.ServiceProvider.GetRequiredService<ILocalOidcSessionCoordinator>());
     }
 
     [Fact]

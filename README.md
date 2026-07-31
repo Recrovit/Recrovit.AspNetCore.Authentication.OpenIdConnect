@@ -683,7 +683,7 @@ At runtime:
 - if no stored session token set exists, reauthentication is required
 - if no refresh token is available for API token renewal, reauthentication is required
 - each logical refresh calls the token endpoint at most once; compare-and-swap retries reuse the same in-memory refresh result instead of repeating the refresh-token exchange
-- if compare-and-swap detects a newer stored session aggregate, the package rereads that aggregate, preserves unrelated API tokens, merges the refreshed API token into the latest state, and keeps a newer stored refresh token instead of overwriting it
+- if compare-and-swap detects a newer stored session aggregate, the package rereads that aggregate and merges only while the source refresh token still matches; a deleted session or rotated source token is never recreated from an older refresh result
 - if the token endpoint fails with `invalid_grant`, the package rereads the current session state before requiring reauthentication; a concurrent successful refresh is reused when it already produced a usable token
 - if token refresh fails because of server-side or transport issues, the request is treated as a service failure
 
@@ -696,7 +696,11 @@ This behavior is handled through `OidcSessionCleanupService`.
 
 The distributed token cache and refresh coordination are session-scoped, not just user-scoped. Multiple concurrent browser sessions for the same subject therefore keep isolated token state, refresh locks, logout cleanup, and reauthentication behavior.
 
-Refresh persistence is modeled as a versioned compare-and-swap update of the complete session token payload. This prevents an older refresh result from overwriting a newer refresh token when token rotation is enabled, while still allowing the refreshed API token to be merged into the latest aggregate state.
+Within one application process, `ILocalOidcSessionCoordinator` serializes every state-changing operation for the same provider, issuer, subject, and local session ID. Sign-in persistence, API-token writes, refresh rotation, logout, session cleanup, and corrupted-payload deletion therefore use one process-wide session lock even though the token store itself is scoped. Refresh holds this local lock through the token endpoint exchange and persistence; logout removes the token aggregate and clears the local cookie before releasing it.
+
+`ILocalOidcSessionCoordinator` is process-local only. Multi-instance hosts still need a cross-node `IOidcSessionRefreshLockProvider` and an `IOidcSessionStateStore` with atomic cross-node compare-and-swap semantics.
+
+Refresh persistence is modeled as a versioned compare-and-swap update of the complete session token payload. This prevents an older refresh result from overwriting a newer refresh token when token rotation is enabled and prevents a completed refresh from restoring state deleted by logout.
 
 Cache keys no longer contain raw issuer, subject, or session identifiers. The package derives a stable HMAC-based session fingerprint from that metadata and uses it as the external cache key segment instead.
 

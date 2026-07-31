@@ -356,6 +356,84 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     [Fact]
+    public async Task GetAccessTokenAsync_LogoutWaitsForRefreshAndRemovesRefreshedStateLast()
+    {
+        using var coordinatorServices = CreateCoordinatorServiceProvider();
+        var coordinator = coordinatorServices.GetRequiredService<ILocalOidcSessionCoordinator>();
+        var user = TestUsers.CreateAuthenticatedUser();
+        var tokenStore = new InMemoryTokenStore(user, new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+        });
+        var refreshHandler = new CoordinatedRefreshHandler(CreateTokenResponse(
+            accessToken: "fresh-token",
+            refreshToken: "fresh-refresh"));
+        var provider = CreateProvider(
+            tokenStore,
+            new DelegatingHttpClientFactory(refreshHandler),
+            localSessionCoordinator: coordinator);
+
+        var refresh = provider.GetAccessTokenAsync(user, "SessionValidationApi", TestContext.Current.CancellationToken);
+        await refreshHandler.FirstRequestStarted;
+
+        var logout = Task.Run(async () =>
+        {
+            await using var localSessionLock = await coordinator.AcquireAsync(user, TestContext.Current.CancellationToken);
+            await ((IDownstreamUserTokenStore)tokenStore).RemoveAsync(
+                user,
+                localSessionLock,
+                TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken);
+
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.False(logout.IsCompleted);
+
+        refreshHandler.ReleaseFirstResponse();
+
+        Assert.Equal("fresh-token", await refresh);
+        await logout;
+        Assert.Null(await tokenStore.GetSessionStateAsync(user, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task GetAccessTokenAsync_DoesNotRefreshOrRestoreStateAfterLogoutOwnsSessionLock()
+    {
+        using var coordinatorServices = CreateCoordinatorServiceProvider();
+        var coordinator = coordinatorServices.GetRequiredService<ILocalOidcSessionCoordinator>();
+        var user = TestUsers.CreateAuthenticatedUser();
+        var tokenStore = new InMemoryTokenStore(user, new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+        });
+        var handler = new CaptureRequestHandler(CreateTokenResponse(
+            accessToken: "fresh-token",
+            refreshToken: "fresh-refresh"));
+        var provider = CreateProvider(
+            tokenStore,
+            new DelegatingHttpClientFactory(handler),
+            localSessionCoordinator: coordinator);
+        var logoutLock = await coordinator.AcquireAsync(user, TestContext.Current.CancellationToken);
+        await ((IDownstreamUserTokenStore)tokenStore).RemoveAsync(
+            user,
+            logoutLock,
+            TestContext.Current.CancellationToken);
+
+        var refresh = provider.GetAccessTokenAsync(user, "SessionValidationApi", TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+
+        Assert.False(refresh.IsCompleted);
+        Assert.Equal(0, handler.RequestCount);
+
+        await logoutLock.DisposeAsync();
+
+        await Assert.ThrowsAsync<OidcReauthenticationRequiredException>(() => refresh);
+        Assert.Equal(0, handler.RequestCount);
+        Assert.Null(await tokenStore.GetSessionStateAsync(user, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task GetAccessTokenAsync_UsesSeparateRefreshLocksForDifferentSessions()
     {
         var firstUser = TestUsers.CreateAuthenticatedUser(sessionId: "session-a");
@@ -421,7 +499,7 @@ public sealed class OidcDownstreamUserTokenProviderTests
                 {
                     SessionTokens = new StoredOidcSessionTokenSet
                     {
-                        RefreshToken = "rotated-refresh-token",
+                        RefreshToken = "refresh-token",
                         ExpiresAtUtc = timeProvider.GetUtcNow().AddHours(1)
                     },
                     ApiTokens = new Dictionary<string, CachedDownstreamApiTokenEntry>(StringComparer.Ordinal)
@@ -438,7 +516,7 @@ public sealed class OidcDownstreamUserTokenProviderTests
                 {
                     SessionTokens = new StoredOidcSessionTokenSet
                     {
-                        RefreshToken = "rotated-refresh-token",
+                        RefreshToken = "refresh-token",
                         ExpiresAtUtc = timeProvider.GetUtcNow().AddHours(1)
                     },
                     ApiTokens = new Dictionary<string, CachedDownstreamApiTokenEntry>(StringComparer.Ordinal)
@@ -467,8 +545,37 @@ public sealed class OidcDownstreamUserTokenProviderTests
         Assert.Equal(3, tokenStore.CompareAndSwapAttempts);
         Assert.Equal("fresh-token", tokenStore.CurrentState.State.ApiTokens[CreateApiKey("SessionValidationApi", ["openid"])].AccessToken);
         Assert.Equal("graph-token-2", tokenStore.CurrentState.State.ApiTokens[CreateApiKey("GraphApi", ["graph.read"])].AccessToken);
-        Assert.Equal("rotated-refresh-token", tokenStore.CurrentState.State.SessionTokens!.RefreshToken);
+        Assert.Equal("fresh-refresh", tokenStore.CurrentState.State.SessionTokens!.RefreshToken);
         Assert.Equal(timeProvider.GetUtcNow(), tokenStore.CurrentState.State.LastRefreshUtc);
+    }
+
+    [Fact]
+    public async Task GetAccessTokenAsync_DoesNotPersistRefreshResult_WhenSessionWasRemovedAfterCompareAndSwapConflict()
+    {
+        var timeProvider = new FixedTimeProvider(DateTimeOffset.Parse("2026-07-31T10:00:00Z"));
+        var tokenStore = new CompareAndSwapConflictSessionStateStore(
+            new OidcSessionState
+            {
+                SessionTokens = new StoredOidcSessionTokenSet
+                {
+                    RefreshToken = "refresh-token",
+                    ExpiresAtUtc = timeProvider.GetUtcNow().AddHours(1)
+                }
+            },
+            [new OidcSessionState()]);
+        var provider = CreateProvider(
+            tokenStore,
+            new StubHttpClientFactory(CreateTokenResponse("fresh-token", "fresh-refresh")),
+            timeProvider: timeProvider);
+
+        await Assert.ThrowsAsync<OidcReauthenticationRequiredException>(() => provider.GetAccessTokenAsync(
+            TestUsers.CreateAuthenticatedUser(),
+            "SessionValidationApi",
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(1, tokenStore.CompareAndSwapAttempts);
+        Assert.Null(tokenStore.CurrentState.State.SessionTokens);
+        Assert.Empty(tokenStore.CurrentState.State.ApiTokens);
     }
 
     [Fact]
@@ -758,6 +865,7 @@ public sealed class OidcDownstreamUserTokenProviderTests
         Dictionary<string, string?>? configurationOverrides = null,
         IOidcSessionStateStore? sessionStateStore = null,
         IOidcSessionRefreshLockProvider? refreshLockProvider = null,
+        ILocalOidcSessionCoordinator? localSessionCoordinator = null,
         TimeProvider? timeProvider = null)
     {
         var services = new ServiceCollection();
@@ -793,6 +901,11 @@ public sealed class OidcDownstreamUserTokenProviderTests
             services.Replace(ServiceDescriptor.Singleton(refreshLockProvider));
         }
 
+        if (localSessionCoordinator is not null)
+        {
+            services.Replace(ServiceDescriptor.Singleton(localSessionCoordinator));
+        }
+
         if (timeProvider is not null)
         {
             services.Replace(ServiceDescriptor.Singleton(timeProvider));
@@ -805,6 +918,14 @@ public sealed class OidcDownstreamUserTokenProviderTests
 
         var serviceProvider = services.BuildServiceProvider();
         return serviceProvider.GetRequiredService<IDownstreamUserTokenProvider>();
+    }
+
+    private static ServiceProvider CreateCoordinatorServiceProvider()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(), new FakeWebHostEnvironment());
+        return services.BuildServiceProvider();
     }
 
     private static OidcDownstreamUserTokenProvider CreateDirectProvider(

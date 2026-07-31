@@ -23,8 +23,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     private readonly IOptions<TokenCacheOptions> tokenCacheOptions;
     private readonly ILogger<DistributedDownstreamUserTokenStore> logger;
     private readonly TimeProvider timeProvider;
-    private readonly object syncRoot = new();
-    private readonly Dictionary<string, SemaphoreSlim> updateLocks = new(StringComparer.Ordinal);
+    private readonly ILocalOidcSessionCoordinator localSessionCoordinator;
     private readonly UserTokenCacheKeyContextAccessor cacheKeyContextAccessor;
     private readonly UserTokenCacheKeyProtector cacheKeyProtector;
     private readonly IDataProtector protector;
@@ -44,6 +43,7 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
             tokenCacheOptions,
             activeProviderOptions,
             logger,
+            LocalOidcSessionCoordinatorRegistry.GetOrCreate(activeProviderOptions),
             TimeProvider.System)
     {
     }
@@ -58,11 +58,34 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
         IOptions<ActiveOidcProviderOptions> activeProviderOptions,
         ILogger<DistributedDownstreamUserTokenStore> logger,
         TimeProvider timeProvider)
+        : this(
+            distributedCache,
+            dataProtectionProvider,
+            tokenCacheOptions,
+            activeProviderOptions,
+            logger,
+            LocalOidcSessionCoordinatorRegistry.GetOrCreate(activeProviderOptions),
+            timeProvider)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DistributedDownstreamUserTokenStore"/> class.
+    /// </summary>
+    public DistributedDownstreamUserTokenStore(
+        IDistributedCache distributedCache,
+        IDataProtectionProvider dataProtectionProvider,
+        IOptions<TokenCacheOptions> tokenCacheOptions,
+        IOptions<ActiveOidcProviderOptions> activeProviderOptions,
+        ILogger<DistributedDownstreamUserTokenStore> logger,
+        ILocalOidcSessionCoordinator localSessionCoordinator,
+        TimeProvider timeProvider)
     {
         this.distributedCache = distributedCache;
         this.tokenCacheOptions = tokenCacheOptions;
         this.logger = logger;
         this.timeProvider = timeProvider;
+        this.localSessionCoordinator = localSessionCoordinator;
         cacheKeyContextAccessor = new UserTokenCacheKeyContextAccessor(activeProviderOptions);
         cacheKeyProtector = new UserTokenCacheKeyProtector(tokenCacheOptions);
         protector = dataProtectionProvider.CreateProtector(
@@ -73,6 +96,24 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     /// <inheritdoc />
     public async Task<VersionedOidcSessionState?> GetSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
+        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(user, cancellationToken);
+        return await GetSessionStateCoreAsync(user, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<VersionedOidcSessionState?> GetSessionStateAsync(
+        ClaimsPrincipal user,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(localSessionLock);
+        return GetSessionStateCoreAsync(user, cancellationToken);
+    }
+
+    private async Task<VersionedOidcSessionState?> GetSessionStateCoreAsync(
+        ClaimsPrincipal user,
+        CancellationToken cancellationToken)
+    {
         var payload = await ReadAsync(BuildSessionCacheKey(user), cancellationToken);
         OidcTokenStoreLog.SessionTokenCacheRead(logger, payload is not null && payload.State.SessionTokens is not null);
         return payload is null
@@ -82,6 +123,28 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
 
     /// <inheritdoc />
     public async Task<bool> TryCompareAndSwapSessionStateAsync(
+        ClaimsPrincipal user,
+        string? expectedVersion,
+        OidcSessionState newState,
+        CancellationToken cancellationToken)
+    {
+        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(user, cancellationToken);
+        return await TryCompareAndSwapSessionStateCoreAsync(user, expectedVersion, newState, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<bool> TryCompareAndSwapSessionStateAsync(
+        ClaimsPrincipal user,
+        string? expectedVersion,
+        OidcSessionState newState,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(localSessionLock);
+        return TryCompareAndSwapSessionStateCoreAsync(user, expectedVersion, newState, cancellationToken);
+    }
+
+    private async Task<bool> TryCompareAndSwapSessionStateCoreAsync(
         ClaimsPrincipal user,
         string? expectedVersion,
         OidcSessionState newState,
@@ -115,22 +178,57 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     }
 
     /// <inheritdoc />
-    public Task DeleteSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+    public async Task DeleteSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
-        return distributedCache.RemoveAsync(BuildSessionCacheKey(user), cancellationToken);
+        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(user, cancellationToken);
+        await DeleteSessionStateCoreAsync(user, cancellationToken);
     }
+
+    /// <inheritdoc />
+    public Task DeleteSessionStateAsync(
+        ClaimsPrincipal user,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(localSessionLock);
+        return DeleteSessionStateCoreAsync(user, cancellationToken);
+    }
+
+    private Task DeleteSessionStateCoreAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+        => distributedCache.RemoveAsync(BuildSessionCacheKey(user), cancellationToken);
 
     /// <inheritdoc />
     public async Task<StoredOidcSessionTokenSet?> GetSessionTokenSetAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
-        var state = await GetSessionStateAsync(user, cancellationToken);
+        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(user, cancellationToken);
+        var state = await GetSessionStateCoreAsync(user, cancellationToken);
         return state?.State.SessionTokens?.Clone();
     }
 
     /// <inheritdoc />
     public async Task StoreSessionTokenSetAsync(ClaimsPrincipal user, StoredOidcSessionTokenSet tokenSet, CancellationToken cancellationToken)
     {
-        await UpdateStateAsync(
+        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(user, cancellationToken);
+        await StoreSessionTokenSetCoreAsync(user, tokenSet, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task StoreSessionTokenSetAsync(
+        ClaimsPrincipal user,
+        StoredOidcSessionTokenSet tokenSet,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(localSessionLock);
+        return StoreSessionTokenSetCoreAsync(user, tokenSet, cancellationToken);
+    }
+
+    private async Task StoreSessionTokenSetCoreAsync(
+        ClaimsPrincipal user,
+        StoredOidcSessionTokenSet tokenSet,
+        CancellationToken cancellationToken)
+    {
+        await UpdateStateCoreAsync(
             user,
             state =>
             {
@@ -149,7 +247,8 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
         IReadOnlyCollection<string> scopes,
         CancellationToken cancellationToken)
     {
-        var state = await GetSessionStateAsync(user, cancellationToken);
+        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(user, cancellationToken);
+        var state = await GetSessionStateCoreAsync(user, cancellationToken);
         var lookupKey = OidcSessionStateApiKey.Create(downstreamApiName, scopes);
         var entry = state is not null && state.State.ApiTokens.TryGetValue(lookupKey, out var tokenEntry)
             ? tokenEntry.Clone()
@@ -166,8 +265,32 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
         CachedDownstreamApiTokenEntry tokenEntry,
         CancellationToken cancellationToken)
     {
+        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(user, cancellationToken);
+        await StoreApiTokenCoreAsync(user, downstreamApiName, scopes, tokenEntry, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task StoreApiTokenAsync(
+        ClaimsPrincipal user,
+        string downstreamApiName,
+        IReadOnlyCollection<string> scopes,
+        CachedDownstreamApiTokenEntry tokenEntry,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(localSessionLock);
+        return StoreApiTokenCoreAsync(user, downstreamApiName, scopes, tokenEntry, cancellationToken);
+    }
+
+    private async Task StoreApiTokenCoreAsync(
+        ClaimsPrincipal user,
+        string downstreamApiName,
+        IReadOnlyCollection<string> scopes,
+        CachedDownstreamApiTokenEntry tokenEntry,
+        CancellationToken cancellationToken)
+    {
         var lookupKey = OidcSessionStateApiKey.Create(downstreamApiName, scopes);
-        await UpdateStateAsync(
+        await UpdateStateCoreAsync(
             user,
             state =>
             {
@@ -182,25 +305,39 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
     /// <inheritdoc />
     public async Task RemoveAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
+        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(user, cancellationToken);
+        await RemoveCoreAsync(user, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task RemoveAsync(
+        ClaimsPrincipal user,
+        ILocalOidcSessionLockLease localSessionLock,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(localSessionLock);
+        return RemoveCoreAsync(user, cancellationToken);
+    }
+
+    private async Task RemoveCoreAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+    {
         OidcTokenStoreLog.TokenStoreRemoveStarted(logger);
-        var state = await GetSessionStateAsync(user, cancellationToken);
+        var state = await GetSessionStateCoreAsync(user, cancellationToken);
         var removedApiTokens = state?.State.ApiTokens.Count ?? 0;
-        await DeleteSessionStateAsync(user, cancellationToken);
+        await DeleteSessionStateCoreAsync(user, cancellationToken);
         OidcTokenStoreLog.TokenStoreRemoveCompleted(logger, removedApiTokens);
     }
 
-    private async Task UpdateStateAsync(
+    private async Task UpdateStateCoreAsync(
         ClaimsPrincipal user,
         Func<OidcSessionState, OidcSessionState> updater,
         CancellationToken cancellationToken)
     {
-        var sessionKey = BuildSessionCacheKey(user);
-        await using var localWriteLock = await AcquireUpdateLockAsync(sessionKey, cancellationToken);
         for (var attempt = 0; attempt < 5; attempt++)
         {
-            var current = await GetSessionStateAsync(user, cancellationToken);
+            var current = await GetSessionStateCoreAsync(user, cancellationToken);
             var nextState = updater(current?.State ?? new OidcSessionState());
-            if (await TryCompareAndSwapSessionStateAsync(user, current?.Version, nextState, cancellationToken))
+            if (await TryCompareAndSwapSessionStateCoreAsync(user, current?.Version, nextState, cancellationToken))
             {
                 return;
             }
@@ -275,34 +412,6 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
             cancellationToken);
     }
 
-    private async ValueTask<IAsyncDisposable> AcquireUpdateLockAsync(string sessionKey, CancellationToken cancellationToken)
-    {
-        SemaphoreSlim semaphore;
-        lock (syncRoot)
-        {
-            if (!updateLocks.TryGetValue(sessionKey, out semaphore!))
-            {
-                semaphore = new SemaphoreSlim(1, 1);
-                updateLocks[sessionKey] = semaphore;
-            }
-        }
-
-        await semaphore.WaitAsync(cancellationToken);
-        return new LocalLockReleaser(this, sessionKey, semaphore);
-    }
-
-    private void ReleaseUpdateLock(string sessionKey, SemaphoreSlim semaphore)
-    {
-        semaphore.Release();
-        lock (syncRoot)
-        {
-            if (semaphore.CurrentCount == 1)
-            {
-                updateLocks.Remove(sessionKey);
-            }
-        }
-    }
-
     private DateTimeOffset ComputeStateExpiration(OidcSessionState state)
     {
         var expirations = state.ApiTokens.Values
@@ -334,15 +443,4 @@ public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenSt
         public OidcSessionState State { get; init; } = new();
     }
 
-    private sealed class LocalLockReleaser(
-        DistributedDownstreamUserTokenStore owner,
-        string sessionKey,
-        SemaphoreSlim semaphore) : IAsyncDisposable
-    {
-        public ValueTask DisposeAsync()
-        {
-            owner.ReleaseUpdateLock(sessionKey, semaphore);
-            return ValueTask.CompletedTask;
-        }
-    }
 }

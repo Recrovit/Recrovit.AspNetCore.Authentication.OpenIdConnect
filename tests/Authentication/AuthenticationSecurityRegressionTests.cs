@@ -135,6 +135,8 @@ public sealed class AuthenticationSecurityRegressionTests
         Assert.Equal(
             [CookieAuthenticationDefaults.AuthenticationScheme, OpenIdConnectDefaults.AuthenticationScheme],
             signOutCalls.Select(static call => call.Scheme).ToArray());
+        Assert.All(signOutCalls, call => Assert.True(
+            app.Services.GetRequiredService<InMemoryTokenStore>().RemoveSequence < call.Sequence));
     }
 
     [Fact]
@@ -152,6 +154,9 @@ public sealed class AuthenticationSecurityRegressionTests
         Assert.Equal(
             OidcAuthenticationConstants.ResponseHeaders.ReauthenticationRequiredValue,
             response.Headers.GetValues(OidcAuthenticationConstants.ResponseHeaders.ReauthenticationRequired).Single());
+        var tokenStore = app.Services.GetRequiredService<InMemoryTokenStore>();
+        var cookieSignOut = Assert.Single(app.Services.GetRequiredService<SignOutRecorder>().Calls);
+        Assert.True(tokenStore.RemoveSequence < cookieSignOut.Sequence);
     }
 
     [Fact]
@@ -322,6 +327,10 @@ public sealed class AuthenticationSecurityRegressionTests
         var tokenStore = new InMemoryTokenStore(
             authenticatedUser ?? TestUsers.CreateAuthenticatedUser(),
             CreateStoredTokenEntry(authenticatedUser));
+        builder.Services.AddSingleton(tokenStore);
+        builder.Services.AddSingleton<ChallengeRecorder>();
+        builder.Services.AddSingleton<SignOutRecorder>();
+        builder.Services.Replace(ServiceDescriptor.Singleton<IAuthenticationService, RecordingAuthenticationService>());
         builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
         builder.Services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         builder.Services.Replace(ServiceDescriptor.Singleton<IDownstreamUserTokenProvider>(tokenProvider));
