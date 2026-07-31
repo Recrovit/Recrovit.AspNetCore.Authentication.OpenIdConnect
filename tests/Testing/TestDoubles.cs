@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authorization.Policy;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Caching.Distributed;
@@ -14,6 +15,7 @@ using Microsoft.Extensions.Primitives;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Claims;
@@ -382,6 +384,9 @@ internal sealed class RecordingDownstreamHttpProxyClient : IDownstreamHttpProxyC
 
     public string? ContentType { get; private set; }
 
+    public IReadOnlyDictionary<string, string[]> ContentHeaders { get; private set; } =
+        new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+
     public string? ContentBody { get; private set; }
 
     public async Task<HttpResponseMessage> SendAsync(
@@ -400,11 +405,21 @@ internal sealed class RecordingDownstreamHttpProxyClient : IDownstreamHttpProxyC
         User = user;
         Headers = headers.ToArray();
         ContentType = content?.Headers.ContentType?.ToString();
+        ContentHeaders = content?.Headers.ToDictionary(
+            static header => header.Key,
+            static header => header.Value.ToArray(),
+            StringComparer.OrdinalIgnoreCase)
+            ?? new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         ContentBody = content is null
             ? null
             : await content.ReadAsStringAsync(cancellationToken);
         return responseFactory();
     }
+}
+
+internal sealed class StubRequestBodyDetectionFeature(bool canHaveBody) : IHttpRequestBodyDetectionFeature
+{
+    public bool CanHaveBody => canHaveBody;
 }
 
 internal sealed class RecordingDownstreamTransportProxyClient : IDownstreamTransportProxyClient
@@ -690,29 +705,9 @@ internal sealed class LoopbackHttpServer : IAsyncDisposable
             headers[line[..separatorIndex].Trim()] = line[(separatorIndex + 1)..].Trim();
         }
 
-        var contentLength = headers.TryGetValue("Content-Length", out var rawContentLength) &&
-            int.TryParse(rawContentLength, out var parsedContentLength)
-                ? parsedContentLength
-                : 0;
-
-        var body = string.Empty;
-        if (contentLength > 0)
-        {
-            var bodyBuffer = new char[contentLength];
-            var totalRead = 0;
-            while (totalRead < contentLength)
-            {
-                var read = await reader.ReadAsync(bodyBuffer.AsMemory(totalRead, contentLength - totalRead), cancellationToken);
-                if (read == 0)
-                {
-                    break;
-                }
-
-                totalRead += read;
-            }
-
-            body = new string(bodyBuffer, 0, totalRead);
-        }
+        var body = IsChunkedTransfer(headers)
+            ? await ReadChunkedBodyAsync(reader, cancellationToken)
+            : await ReadFixedLengthBodyAsync(reader, headers, cancellationToken);
 
         var request = new LoopbackHttpRequest(parts[0], parts[1], headers, body);
         Requests.Enqueue(request);
@@ -738,6 +733,95 @@ internal sealed class LoopbackHttpServer : IAsyncDisposable
         }
 
         await writer.FlushAsync(cancellationToken);
+    }
+
+    private static bool IsChunkedTransfer(IReadOnlyDictionary<string, string> headers)
+        => headers.TryGetValue("Transfer-Encoding", out var transferEncoding)
+            && transferEncoding.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Any(static value => value.Equals("chunked", StringComparison.OrdinalIgnoreCase));
+
+    private static async Task<string> ReadFixedLengthBodyAsync(
+        StreamReader reader,
+        IReadOnlyDictionary<string, string> headers,
+        CancellationToken cancellationToken)
+    {
+        if (!headers.TryGetValue("Content-Length", out var rawContentLength) ||
+            !int.TryParse(rawContentLength, out var contentLength) ||
+            contentLength <= 0)
+        {
+            return string.Empty;
+        }
+
+        var bodyBuffer = new char[contentLength];
+        var totalRead = 0;
+        while (totalRead < contentLength)
+        {
+            var read = await reader.ReadAsync(bodyBuffer.AsMemory(totalRead, contentLength - totalRead), cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+
+            totalRead += read;
+        }
+
+        return new string(bodyBuffer, 0, totalRead);
+    }
+
+    private static async Task<string> ReadChunkedBodyAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        var builder = new StringBuilder();
+
+        while (true)
+        {
+            var sizeLine = await reader.ReadLineAsync(cancellationToken)
+                ?? throw new InvalidOperationException("The chunked request body ended before the chunk size line was read.");
+            var sizeToken = sizeLine.Split(';', 2)[0].Trim();
+            if (!int.TryParse(sizeToken, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var chunkSize))
+            {
+                throw new InvalidOperationException($"The chunked request body contains an invalid chunk size '{sizeLine}'.");
+            }
+
+            if (chunkSize == 0)
+            {
+                await ConsumeTrailerHeadersAsync(reader, cancellationToken);
+                break;
+            }
+
+            var chunkBuffer = new char[chunkSize];
+            var totalRead = 0;
+            while (totalRead < chunkSize)
+            {
+                var read = await reader.ReadAsync(chunkBuffer.AsMemory(totalRead, chunkSize - totalRead), cancellationToken);
+                if (read == 0)
+                {
+                    throw new InvalidOperationException("The chunked request body ended before the current chunk was fully read.");
+                }
+
+                totalRead += read;
+            }
+
+            builder.Append(chunkBuffer, 0, totalRead);
+
+            _ = await reader.ReadLineAsync(cancellationToken)
+                ?? throw new InvalidOperationException("The chunked request body ended before the chunk terminator was read.");
+        }
+
+        return builder.ToString();
+    }
+
+    private static async Task ConsumeTrailerHeadersAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        string? trailerLine;
+        do
+        {
+            trailerLine = await reader.ReadLineAsync(cancellationToken);
+            if (trailerLine is null)
+            {
+                throw new InvalidOperationException("The chunked request body ended before the trailer terminator was read.");
+            }
+        }
+        while (trailerLine.Length > 0);
     }
 }
 

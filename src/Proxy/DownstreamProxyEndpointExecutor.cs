@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
@@ -77,7 +78,13 @@ public static class DownstreamProxyEndpointExecutor
 
     private static HttpContent? CreateContent(HttpRequest request)
     {
-        if (!CanHaveBody(request.Method) || request.ContentLength is null or 0)
+        if (!CanHaveBody(request.Method))
+        {
+            return null;
+        }
+
+        var bodyDetection = request.HttpContext.Features.Get<IHttpRequestBodyDetectionFeature>();
+        if (bodyDetection?.CanHaveBody != true)
         {
             return null;
         }
@@ -88,6 +95,9 @@ public static class DownstreamProxyEndpointExecutor
             content.Headers.ContentType = MediaTypeHeaderValue.Parse(request.ContentType);
         }
 
+        CopyContentHeaderIfPresent(request.Headers, content.Headers, "Content-Encoding");
+        CopyContentHeaderIfPresent(request.Headers, content.Headers, "Content-Language");
+
         return content;
     }
 
@@ -96,6 +106,19 @@ public static class DownstreamProxyEndpointExecutor
             || HttpMethods.IsPut(method)
             || HttpMethods.IsPatch(method)
             || HttpMethods.IsDelete(method);
+
+    private static void CopyContentHeaderIfPresent(
+        IHeaderDictionary requestHeaders,
+        HttpContentHeaders contentHeaders,
+        string headerName)
+    {
+        if (!requestHeaders.TryGetValue(headerName, out var values) || values.Count == 0)
+        {
+            return;
+        }
+
+        contentHeaders.TryAddWithoutValidation(headerName, values.ToArray());
+    }
 
     private static async Task WriteResponseAsync(
         HttpContext context,
