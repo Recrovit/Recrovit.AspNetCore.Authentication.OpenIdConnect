@@ -45,6 +45,28 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     [Fact]
+    public async Task GetAccessTokenAsync_UsesDedicatedNamedHttpClientForRefresh()
+    {
+        var factory = new RecordingHttpClientFactory(_ => new HttpClient(new CaptureRequestHandler())
+        {
+            BaseAddress = new Uri("https://idp.example.com")
+        });
+        var provider = CreateProvider(
+            new InMemoryTokenStore(new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            }),
+            factory);
+
+        var token = await provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None);
+
+        Assert.Equal("captured-token", token);
+        Assert.Equal(1, factory.CreateClientCount);
+        Assert.Equal("Recrovit.OpenIdConnect.TokenEndpoint", factory.LastClientName);
+    }
+
+    [Fact]
     public async Task GetAccessTokenAsync_ReusesCachedTokenForSameApi()
     {
         var user = TestUsers.CreateAuthenticatedUser();
@@ -640,6 +662,37 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     [Fact]
+    public async Task GetAccessTokenAsync_ThrowsTokenRefreshFailed_WhenTokenEndpointRequestTimesOut()
+    {
+        var tokenEndpoint = new Uri("http://127.0.0.1/connect/token", UriKind.Absolute);
+        var oidcOptions = CreateProviderOptions(tokenEndpointTimeout: TimeSpan.FromMilliseconds(50));
+        var provider = CreateDirectProvider(
+            new InMemoryTokenStore(new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            }),
+            new RecordingHttpClientFactory(_ => new HttpClient(new DelayedResponseHandler(TimeSpan.FromSeconds(1)))
+            {
+                Timeout = TimeSpan.FromMilliseconds(50)
+            }),
+            oidcOptions: oidcOptions,
+            openIdOptionsMonitor: new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
+            {
+                Configuration = new OpenIdConnectConfiguration
+                {
+                    TokenEndpoint = tokenEndpoint.AbsoluteUri
+                },
+                ConfigurationManager = null
+            }));
+
+        var ex = await Assert.ThrowsAsync<OidcTokenRefreshFailedException>(() =>
+            provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None));
+
+        Assert.Contains("timed out", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task GetAccessTokenAsync_ReusesConcurrentTokenOrReauthenticates_WhenRefreshFailsWithInvalidGrant()
     {
         var user = TestUsers.CreateAuthenticatedUser();
@@ -985,7 +1038,8 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     private static OidcProviderOptions CreateProviderOptions(
-        OidcClientAuthenticationMethod clientAuthenticationMethod = OidcClientAuthenticationMethod.ClientSecretPost)
+        OidcClientAuthenticationMethod clientAuthenticationMethod = OidcClientAuthenticationMethod.ClientSecretPost,
+        TimeSpan? tokenEndpointTimeout = null)
     {
         return new OidcProviderOptions
         {
@@ -995,7 +1049,8 @@ public sealed class OidcDownstreamUserTokenProviderTests
                 ? "client-secret"
                 : null,
             ClientAuthenticationMethod = clientAuthenticationMethod,
-            Scopes = ["openid", "profile"]
+            Scopes = ["openid", "profile"],
+            TokenEndpointTimeout = tokenEndpointTimeout ?? TimeSpan.FromSeconds(30)
         };
     }
 
@@ -1072,6 +1127,18 @@ public sealed class OidcDownstreamUserTokenProviderTests
                     ? Uri.UnescapeDataString(parts[1].Replace("+", "%20", StringComparison.Ordinal))
                     : string.Empty,
                 StringComparer.Ordinal);
+    }
+
+    private sealed class DelayedResponseHandler(TimeSpan delay) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(delay, cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(CreateTokenResponse("fresh-token", "fresh-refresh"))
+            };
+        }
     }
 
     private sealed class AdvanceTimeHandler(

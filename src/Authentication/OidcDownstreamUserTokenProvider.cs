@@ -221,7 +221,7 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         }
 
         var apiTokenKey = OidcSessionStateApiKey.Create(downstreamApiName, requestedScopes);
-        using var client = httpClientFactory.CreateClient();
+        using var client = httpClientFactory.CreateClient(OidcHttpClientNames.TokenEndpoint);
         OidcTokenProviderLog.RefreshLockWaiting(logger, downstreamApiName);
         await using var refreshLock = await refreshLockProvider.AcquireAsync(user, cancellationToken);
         using var leaseScope = logger.BeginScope(OidcLogScopes.Create(
@@ -393,6 +393,13 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         OidcTokenProviderLog.RefreshRequestStarted(logger, activeProviderOptions.Value.ProviderName, downstreamApiName);
         using var response = await SendRefreshRequestAsync(client, request, cancellationToken, downstreamApiName);
         OidcTokenProviderLog.RefreshResponseReceived(logger, activeProviderOptions.Value.ProviderName, downstreamApiName, (int)response.StatusCode);
+        if (IsRedirectStatusCode(response.StatusCode))
+        {
+            OidcTokenProviderLog.RefreshHttpFailed(logger, activeProviderOptions.Value.ProviderName, downstreamApiName, (int)response.StatusCode, "redirect_blocked");
+            throw new OidcTokenRefreshFailedException(
+                $"Refresh token exchange failed: {(int)response.StatusCode} redirect responses are not allowed from the token endpoint.");
+        }
+
         if (!response.IsSuccessStatusCode)
         {
             var errorPayload = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -639,6 +646,11 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         {
             return await client.SendAsync(request, cancellationToken);
         }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            OidcTokenProviderLog.RefreshTransportFailed(logger, ex, activeProviderOptions.Value.ProviderName, downstreamApiName, ex.GetType().Name);
+            throw new OidcTokenRefreshFailedException("Refresh token exchange failed because the token endpoint request timed out.", ex);
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             OidcTokenProviderLog.RefreshTransportFailed(logger, ex, activeProviderOptions.Value.ProviderName, downstreamApiName, ex.GetType().Name);
@@ -697,6 +709,13 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             ?? throw new InvalidOperationException(
                 $"The configured {nameof(IDownstreamUserTokenStore)} must also implement {nameof(IOidcSessionStateStore)}.");
     }
+
+    private static bool IsRedirectStatusCode(HttpStatusCode statusCode)
+        => statusCode is HttpStatusCode.MovedPermanently
+            or HttpStatusCode.Found
+            or HttpStatusCode.SeeOther
+            or HttpStatusCode.TemporaryRedirect
+            or HttpStatusCode.PermanentRedirect;
 
     private sealed record RefreshResult(
         CachedDownstreamApiTokenEntry ApiToken,

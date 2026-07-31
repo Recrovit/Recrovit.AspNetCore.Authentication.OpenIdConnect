@@ -13,7 +13,9 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
+using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -323,6 +325,20 @@ internal sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider
     }
 }
 
+internal sealed class RecordingHttpClientFactory(Func<string, HttpClient> clientFactory) : IHttpClientFactory
+{
+    public string? LastClientName { get; private set; }
+
+    public int CreateClientCount { get; private set; }
+
+    public HttpClient CreateClient(string name)
+    {
+        CreateClientCount++;
+        LastClientName = name;
+        return clientFactory(name);
+    }
+}
+
 internal sealed class FixedLeaseRefreshLockProvider(string ownerToken, DateTimeOffset expiresAtUtc) : IOidcSessionRefreshLockProvider
 {
     public Task<IOidcSessionRefreshLockLease> AcquireAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
@@ -575,6 +591,170 @@ internal static class TestOperationSequence
     private static long sequence;
 
     public static long Next() => Interlocked.Increment(ref sequence);
+}
+
+internal sealed class LoopbackHttpServer : IAsyncDisposable
+{
+    private readonly TcpListener listener;
+    private readonly Func<LoopbackHttpRequest, CancellationToken, Task<LoopbackHttpResponse>> handler;
+    private readonly CancellationTokenSource shutdown = new();
+    private readonly Task acceptLoop;
+
+    private LoopbackHttpServer(
+        TcpListener listener,
+        Func<LoopbackHttpRequest, CancellationToken, Task<LoopbackHttpResponse>> handler)
+    {
+        this.listener = listener;
+        this.handler = handler;
+        listener.Start();
+        var endpoint = (IPEndPoint)listener.LocalEndpoint;
+        BaseAddress = new Uri($"http://127.0.0.1:{endpoint.Port}/", UriKind.Absolute);
+        acceptLoop = Task.Run(() => AcceptLoopAsync(shutdown.Token));
+    }
+
+    public Uri BaseAddress { get; }
+
+    public ConcurrentQueue<LoopbackHttpRequest> Requests { get; } = new();
+
+    public static Task<LoopbackHttpServer> StartAsync(
+        Func<LoopbackHttpRequest, CancellationToken, Task<LoopbackHttpResponse>> handler)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        return Task.FromResult(new LoopbackHttpServer(listener, handler));
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        shutdown.Cancel();
+        listener.Stop();
+
+        try
+        {
+            await acceptLoop;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        shutdown.Dispose();
+    }
+
+    private async Task AcceptLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            TcpClient client;
+            try
+            {
+                client = await listener.AcceptTcpClientAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
+
+            _ = Task.Run(() => HandleClientAsync(client, cancellationToken), cancellationToken);
+        }
+    }
+
+    private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
+    {
+        using var _ = client;
+        using var stream = client.GetStream();
+        using var reader = new StreamReader(stream, Encoding.ASCII, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+
+        var requestLine = await reader.ReadLineAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(requestLine))
+        {
+            return;
+        }
+
+        var parts = requestLine.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string? line;
+        while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync(cancellationToken)))
+        {
+            var separatorIndex = line.IndexOf(':');
+            if (separatorIndex <= 0)
+            {
+                continue;
+            }
+
+            headers[line[..separatorIndex].Trim()] = line[(separatorIndex + 1)..].Trim();
+        }
+
+        var contentLength = headers.TryGetValue("Content-Length", out var rawContentLength) &&
+            int.TryParse(rawContentLength, out var parsedContentLength)
+                ? parsedContentLength
+                : 0;
+
+        var body = string.Empty;
+        if (contentLength > 0)
+        {
+            var bodyBuffer = new char[contentLength];
+            var totalRead = 0;
+            while (totalRead < contentLength)
+            {
+                var read = await reader.ReadAsync(bodyBuffer.AsMemory(totalRead, contentLength - totalRead), cancellationToken);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                totalRead += read;
+            }
+
+            body = new string(bodyBuffer, 0, totalRead);
+        }
+
+        var request = new LoopbackHttpRequest(parts[0], parts[1], headers, body);
+        Requests.Enqueue(request);
+
+        var response = await handler(request, cancellationToken);
+        using var writer = new StreamWriter(stream, Encoding.ASCII, leaveOpen: true)
+        {
+            NewLine = "\r\n"
+        };
+        var payload = response.Body ?? string.Empty;
+        await writer.WriteLineAsync($"HTTP/1.1 {(int)response.StatusCode} {response.ReasonPhrase ?? response.StatusCode.ToString()}");
+        foreach (var (headerName, headerValue) in response.Headers)
+        {
+            await writer.WriteLineAsync($"{headerName}: {headerValue}");
+        }
+
+        await writer.WriteLineAsync($"Content-Length: {Encoding.ASCII.GetByteCount(payload)}");
+        await writer.WriteLineAsync("Connection: close");
+        await writer.WriteLineAsync();
+        if (payload.Length > 0)
+        {
+            await writer.WriteAsync(payload);
+        }
+
+        await writer.FlushAsync(cancellationToken);
+    }
+}
+
+internal sealed record LoopbackHttpRequest(
+    string Method,
+    string Path,
+    IReadOnlyDictionary<string, string> Headers,
+    string Body);
+
+internal sealed record LoopbackHttpResponse(
+    HttpStatusCode StatusCode,
+    string? Body = null,
+    string? ReasonPhrase = null,
+    IReadOnlyDictionary<string, string>? ResponseHeaders = null)
+{
+    public IReadOnlyDictionary<string, string> Headers { get; init; } =
+        ResponseHeaders ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 }
 
 internal sealed class RecordingAuthenticationService(

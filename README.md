@@ -127,6 +127,7 @@ Key responsibilities:
 
 - identity provider authority
 - OIDC client credentials and certificate-based client authentication
+- token endpoint refresh timeout
 - callback and sign-out paths
 - extra login and identity scopes
 - UserInfo loading behavior
@@ -350,6 +351,7 @@ In development or simple single-instance local runs, you can usually omit it. In
           "ClientId": "client-id",
           "ClientAuthenticationMethod": "ClientSecretPost",
           "ClientSecret": "client-secret",
+          "TokenEndpointTimeout": "00:00:30",
           "Scopes": [ "openid", "profile", "offline_access" ],
           "CallbackPath": "/signin-oidc",
           "SignedOutCallbackPath": "/signout-callback-oidc",
@@ -543,6 +545,7 @@ If you instantiate `OidcDownstreamUserTokenProvider` directly, use the public co
           "Authority": "https://idp.example.com",
           "ClientId": "client-id",
           "ClientAuthenticationMethod": "PrivateKeyJwt",
+          "TokenEndpointTimeout": "00:00:30",
           "ClientCertificate": {
             "Source": "File",
             "File": {
@@ -575,6 +578,7 @@ Windows hosts can also load the certificate from the Windows Certificate Store.
           "Authority": "https://idp.example.com",
           "ClientId": "client-id",
           "ClientAuthenticationMethod": "PrivateKeyJwt",
+          "TokenEndpointTimeout": "00:00:30",
           "ClientCertificate": {
             "Source": "WindowsStore",
             "Store": {

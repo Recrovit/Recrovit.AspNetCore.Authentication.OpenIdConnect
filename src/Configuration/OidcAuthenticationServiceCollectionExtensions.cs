@@ -101,6 +101,9 @@ public static class OidcAuthenticationServiceCollectionExtensions
                     || options.ClientCertificate!.Source != OidcClientCertificateSource.WindowsStore
                     || OperatingSystem.IsWindows(),
                 $"{providerSection.Path}:ClientCertificate:Source 'WindowsStore' is only supported on Windows.")
+            .Validate(
+                options => options.TokenEndpointTimeout > TimeSpan.Zero,
+                $"{providerSection.Path}:TokenEndpointTimeout must be a positive time span.")
             .ValidateOnStart();
 
         services.AddOptions<TokenCacheOptions>()
@@ -167,7 +170,18 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
         services.AddDistributedMemoryCache();
         services.AddHttpContextAccessor();
-        services.AddHttpClient();
+        services.AddHttpClient(
+                OidcHttpClientNames.TokenEndpoint,
+                static (serviceProvider, client) =>
+                {
+                    var options = serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>().Value;
+                    client.Timeout = options.TokenEndpointTimeout;
+                })
+            .ConfigurePrimaryHttpMessageHandler(static () => new HttpClientHandler
+            {
+                AllowAutoRedirect = false,
+                UseCookies = false
+            });
         services.AddAntiforgery();
         services.AddHttpClient<IDownstreamHttpProxyClient, DownstreamHttpProxyClient>()
             .ConfigurePrimaryHttpMessageHandler(static () => new HttpClientHandler

@@ -211,6 +211,73 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesDefaultTokenEndpointTimeout()
+    {
+        var configuration = TestConfiguration.Build();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>().Value;
+
+        Assert.Equal(TimeSpan.FromSeconds(30), options.TokenEndpointTimeout);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_BindsConfiguredTokenEndpointTimeout()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:TokenEndpointTimeout"] = "00:00:42"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>().Value;
+
+        Assert.Equal(TimeSpan.FromSeconds(42), options.TokenEndpointTimeout);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesTokenEndpointTimeout()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:TokenEndpointTimeout"] = "00:00:00"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>().Value);
+
+        Assert.Contains("TokenEndpointTimeout", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ConfiguresNamedTokenEndpointHttpClientTimeout()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:TokenEndpointTimeout"] = "00:00:42"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var client = serviceProvider.GetRequiredService<IHttpClientFactory>()
+            .CreateClient("Recrovit.OpenIdConnect.TokenEndpoint");
+
+        Assert.Equal(TimeSpan.FromSeconds(42), client.Timeout);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_BindsConfiguredSessionTimeoutPolicy()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
