@@ -123,7 +123,9 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     public async Task StoreApiTokenAsync_PreservesExpectedTtlPolicy()
     {
         var distributedCache = new RecordingDistributedCache();
-        var store = CreateStore(distributedCache);
+        var timeProvider = new FixedTimeProvider(DateTimeOffset.Parse("2026-07-31T10:00:00Z"));
+        var store = CreateStore(distributedCache, timeProvider: timeProvider);
+        var expiresAtUtc = timeProvider.GetUtcNow().AddMinutes(5);
 
         await store.StoreApiTokenAsync(
             TestUsers.CreateAuthenticatedUser(),
@@ -132,16 +134,13 @@ public sealed class DistributedDownstreamUserTokenStoreTests
             new CachedDownstreamApiTokenEntry
             {
                 AccessToken = "access-token",
-                ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+                ExpiresAtUtc = expiresAtUtc
             },
             CancellationToken.None);
 
         var apiWrite = Assert.Single(distributedCache.Writes);
         Assert.NotNull(apiWrite.Options);
-        Assert.InRange(
-            apiWrite.Options.AbsoluteExpirationRelativeToNow!.Value,
-            TimeSpan.FromHours(12).Add(TimeSpan.FromMinutes(4)),
-            TimeSpan.FromHours(12).Add(TimeSpan.FromMinutes(6)));
+        Assert.Equal(TimeSpan.FromHours(12).Add(expiresAtUtc - timeProvider.GetUtcNow()), apiWrite.Options.AbsoluteExpirationRelativeToNow);
     }
 
     [Fact]
@@ -408,7 +407,8 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     private static DistributedDownstreamUserTokenStore CreateStore(
         IDistributedCache distributedCache,
         string providerName = "Duende",
-        ILogger<DistributedDownstreamUserTokenStore>? logger = null)
+        ILogger<DistributedDownstreamUserTokenStore>? logger = null,
+        TimeProvider? timeProvider = null)
     {
         return new DistributedDownstreamUserTokenStore(
             distributedCache,
@@ -422,7 +422,8 @@ public sealed class DistributedDownstreamUserTokenStoreTests
             {
                 ProviderName = providerName
             }),
-            logger ?? NullLogger<DistributedDownstreamUserTokenStore>.Instance);
+            logger ?? NullLogger<DistributedDownstreamUserTokenStore>.Instance,
+            timeProvider ?? TimeProvider.System);
     }
 
     private static string BuildSessionCacheKey(System.Security.Claims.ClaimsPrincipal user)

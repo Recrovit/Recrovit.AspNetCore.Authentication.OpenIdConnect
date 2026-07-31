@@ -682,7 +682,9 @@ At runtime:
 - if the API token is near expiration or missing, the package attempts a refresh-token exchange for that API scope set
 - if no stored session token set exists, reauthentication is required
 - if no refresh token is available for API token renewal, reauthentication is required
-- if the token endpoint fails with a recoverable user-facing auth failure such as `invalid_grant`, reauthentication is required
+- each logical refresh calls the token endpoint at most once; compare-and-swap retries reuse the same in-memory refresh result instead of repeating the refresh-token exchange
+- if compare-and-swap detects a newer stored session aggregate, the package rereads that aggregate, preserves unrelated API tokens, merges the refreshed API token into the latest state, and keeps a newer stored refresh token instead of overwriting it
+- if the token endpoint fails with `invalid_grant`, the package rereads the current session state before requiring reauthentication; a concurrent successful refresh is reused when it already produced a usable token
 - if token refresh fails because of server-side or transport issues, the request is treated as a service failure
 
 When the package decides the user must sign in again, it clears the local session and writes:
@@ -694,11 +696,11 @@ This behavior is handled through `OidcSessionCleanupService`.
 
 The distributed token cache and refresh coordination are session-scoped, not just user-scoped. Multiple concurrent browser sessions for the same subject therefore keep isolated token state, refresh locks, logout cleanup, and reauthentication behavior.
 
-Refresh persistence is modeled as a versioned compare-and-swap update of the complete session token payload. This prevents an older refresh result from overwriting a newer refresh token when token rotation is enabled.
+Refresh persistence is modeled as a versioned compare-and-swap update of the complete session token payload. This prevents an older refresh result from overwriting a newer refresh token when token rotation is enabled, while still allowing the refreshed API token to be merged into the latest aggregate state.
 
 Cache keys no longer contain raw issuer, subject, or session identifiers. The package derives a stable HMAC-based session fingerprint from that metadata and uses it as the external cache key segment instead.
 
-The built-in `DistributedDownstreamUserTokenStore` and `UserRefreshLockProvider` are intended as safe defaults for development and single-instance hosts. They do not by themselves provide production-safe cross-node compare-and-swap or cross-node refresh lease guarantees.
+The built-in `DistributedDownstreamUserTokenStore` and `UserRefreshLockProvider` are intended as safe defaults for development and single-instance hosts. The in-process `UserRefreshLockProvider` relies on `SemaphoreSlim` ownership and therefore does not expire its local lease by time. These defaults do not by themselves provide production-safe cross-node compare-and-swap or cross-node refresh lease guarantees.
 
 ## Session Validation
 

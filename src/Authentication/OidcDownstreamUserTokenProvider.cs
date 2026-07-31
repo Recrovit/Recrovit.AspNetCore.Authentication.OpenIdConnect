@@ -55,7 +55,7 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         : this(
             tokenStore,
             GetRequiredSessionStateStore(tokenStore),
-            new UserRefreshLockProvider(activeProviderOptions, tokenCacheOptions, TimeProvider.System),
+            new UserRefreshLockProvider(activeProviderOptions),
             downstreamApiCatalog,
             new OidcScopeResolver(oidcOptions.Value.Scopes, downstreamApiCatalog),
             oidcOptions,
@@ -93,7 +93,7 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
         : this(
             tokenStore,
             GetRequiredSessionStateStore(tokenStore),
-            new UserRefreshLockProvider(activeProviderOptions, tokenCacheOptions, TimeProvider.System),
+            new UserRefreshLockProvider(activeProviderOptions),
             downstreamApiCatalog,
             new OidcScopeResolver(oidcOptions.Value.Scopes, downstreamApiCatalog),
             oidcOptions,
@@ -181,72 +181,99 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             throw new OidcTokenRefreshFailedException(httpsRequirementError);
         }
 
-        using var client = httpClientFactory.CreateClient();
         var apiTokenKey = OidcSessionStateApiKey.Create(downstreamApiName, requestedScopes);
-        for (var attempt = 0; attempt < 5; attempt++)
+        using var client = httpClientFactory.CreateClient();
+        OidcTokenProviderLog.RefreshLockWaiting(logger, downstreamApiName);
+        await using var refreshLock = await refreshLockProvider.AcquireAsync(user, cancellationToken);
+        using var leaseScope = logger.BeginScope(OidcLogScopes.Create(
+            traceIdentifier: Activity.Current?.Id ?? Guid.NewGuid().ToString("n"),
+            providerName: activeProviderOptions.Value.ProviderName,
+            downstreamApiName: downstreamApiName,
+            flowStep: "refresh-lease",
+            leaseOwnerToken: refreshLock.OwnerToken,
+            leaseExpiresAtUtc: refreshLock.ExpiresAtUtc));
+        OidcTokenProviderLog.RefreshLockAcquired(logger, downstreamApiName);
+
+        var sessionState = await sessionStateStore.GetSessionStateAsync(user, cancellationToken);
+        entry = TryGetApiTokenEntry(sessionState, apiTokenKey);
+        refreshRequired = NeedsRefresh(entry, refreshSkew);
+        OidcTokenProviderLog.ApiTokenCacheEvaluated(logger, downstreamApiName, entry is not null, refreshRequired);
+        if (!refreshRequired)
         {
-            OidcTokenProviderLog.RefreshLockWaiting(logger, downstreamApiName);
-            await using var refreshLock = await refreshLockProvider.AcquireAsync(user, cancellationToken);
-            using var leaseScope = logger.BeginScope(OidcLogScopes.Create(
-                traceIdentifier: Activity.Current?.Id ?? Guid.NewGuid().ToString("n"),
-                providerName: activeProviderOptions.Value.ProviderName,
-                downstreamApiName: downstreamApiName,
-                flowStep: "refresh-lease",
-                leaseOwnerToken: refreshLock.OwnerToken,
-                leaseExpiresAtUtc: refreshLock.ExpiresAtUtc));
-            OidcTokenProviderLog.RefreshLockAcquired(logger, downstreamApiName);
+            return entry!.AccessToken;
+        }
 
-            var sessionState = await sessionStateStore.GetSessionStateAsync(user, cancellationToken);
-            entry = TryGetApiTokenEntry(sessionState, apiTokenKey);
-            refreshRequired = NeedsRefresh(entry, refreshSkew);
-            OidcTokenProviderLog.ApiTokenCacheEvaluated(logger, downstreamApiName, entry is not null, refreshRequired);
-            if (!refreshRequired)
-            {
-                return entry!.AccessToken;
-            }
+        var sessionTokenSet = GetRequiredSessionTokenSet(sessionState, downstreamApiName);
+        if (string.IsNullOrWhiteSpace(sessionTokenSet.RefreshToken))
+        {
+            OidcTokenProviderLog.RefreshTokenMissing(logger, downstreamApiName, hasRefreshToken: false);
+            throw new OidcReauthenticationRequiredException("The stored token set does not contain a refresh token, so a new sign-in is required.");
+        }
 
-            var sessionTokenSet = GetRequiredSessionTokenSet(sessionState, downstreamApiName);
-            if (string.IsNullOrWhiteSpace(sessionTokenSet.RefreshToken))
-            {
-                OidcTokenProviderLog.RefreshTokenMissing(logger, downstreamApiName, hasRefreshToken: false);
-                throw new OidcReauthenticationRequiredException("The stored token set does not contain a refresh token, so a new sign-in is required.");
-            }
-
-            var refreshResult = await RefreshTokenSetAsync(
+        RefreshResult refreshResult;
+        var sourceVersion = sessionState?.Version;
+        var sourceRefreshToken = sessionTokenSet.RefreshToken;
+        try
+        {
+            refreshResult = await RefreshTokenSetAsync(
                 client,
                 tokenEndpoint,
                 sessionTokenSet,
                 requestedScopes,
                 downstreamApiName,
                 cancellationToken);
-
-            if (timeProvider.GetUtcNow() > refreshLock.ExpiresAtUtc)
-            {
-                OidcTokenProviderLog.RefreshLockLeaseExpired(logger, activeProviderOptions.Value.ProviderName, downstreamApiName);
-                continue;
-            }
-
-            var nextState = (sessionState?.State ?? new OidcSessionState()).Clone();
-            nextState.SessionTokens = refreshResult.SessionTokenSet;
-            nextState.ApiTokens[apiTokenKey] = refreshResult.ApiToken;
-            nextState.LastRefreshUtc = timeProvider.GetUtcNow();
-
-            if (await sessionStateStore.TryCompareAndSwapSessionStateAsync(
+        }
+        catch (Exception ex) when (
+            ex is not OperationCanceledException &&
+            ex is not InvalidOperationException or OidcReauthenticationRequiredException or OidcTokenRefreshFailedException)
+        {
+            return await HandleRefreshFailureAsync(
+                ex,
                 user,
-                sessionState?.Version,
-                nextState,
-                cancellationToken))
+                downstreamApiName,
+                apiTokenKey,
+                refreshSkew,
+                sourceVersion,
+                sourceRefreshToken,
+                cancellationToken);
+        }
+
+        var refreshCompletedUtc = timeProvider.GetUtcNow();
+        VersionedOidcSessionState? latestState = sessionState;
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            if (attempt > 0)
             {
-                OidcTokenProviderLog.RefreshedTokensStored(logger, activeProviderOptions.Value.ProviderName, downstreamApiName, "success");
-                return refreshResult.ApiToken.AccessToken;
+                latestState = await sessionStateStore.GetSessionStateAsync(user, cancellationToken);
             }
 
-            var latestState = await sessionStateStore.GetSessionStateAsync(user, cancellationToken);
             var latestEntry = TryGetApiTokenEntry(latestState, apiTokenKey);
             if (!NeedsRefresh(latestEntry, refreshSkew))
             {
                 OidcTokenProviderLog.RefreshedTokensReusedAfterConcurrentUpdate(logger, activeProviderOptions.Value.ProviderName, downstreamApiName);
                 return latestEntry!.AccessToken;
+            }
+
+            if (RefreshLeaseExpired(refreshLock, downstreamApiName))
+            {
+                throw new OidcTokenRefreshFailedException("The refreshed token state could not be persisted because the refresh lease expired before the compare-and-swap update completed.");
+            }
+
+            var nextState = CreateMergedRefreshedState(
+                latestState?.State,
+                apiTokenKey,
+                refreshResult,
+                sourceRefreshToken,
+                refreshCompletedUtc);
+
+            if (await sessionStateStore.TryCompareAndSwapSessionStateAsync(
+                user,
+                latestState?.Version,
+                nextState,
+                cancellationToken))
+            {
+                OidcTokenProviderLog.RefreshedTokensStored(logger, activeProviderOptions.Value.ProviderName, downstreamApiName, "success");
+                return refreshResult.ApiToken.AccessToken;
             }
         }
 
@@ -338,7 +365,7 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             new CachedDownstreamApiTokenEntry
             {
                 AccessToken = accessToken,
-                ExpiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(expiresInSeconds)
+                ExpiresAtUtc = timeProvider.GetUtcNow().AddSeconds(expiresInSeconds)
             },
             new StoredOidcSessionTokenSet
             {
@@ -352,9 +379,82 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             });
     }
 
-    private static bool NeedsRefresh(CachedDownstreamApiTokenEntry? entry, TimeSpan refreshSkew)
+    private bool NeedsRefresh(CachedDownstreamApiTokenEntry? entry, TimeSpan refreshSkew)
     {
-        return entry is null || entry.ExpiresAtUtc <= DateTimeOffset.UtcNow.Add(refreshSkew);
+        return entry is null || entry.ExpiresAtUtc <= timeProvider.GetUtcNow().Add(refreshSkew);
+    }
+
+    private async Task<string> HandleRefreshFailureAsync(
+        Exception refreshException,
+        ClaimsPrincipal user,
+        string downstreamApiName,
+        string apiTokenKey,
+        TimeSpan refreshSkew,
+        string? sourceVersion,
+        string? sourceRefreshToken,
+        CancellationToken cancellationToken)
+    {
+        var latestState = await sessionStateStore.GetSessionStateAsync(user, cancellationToken);
+        var latestEntry = TryGetApiTokenEntry(latestState, apiTokenKey);
+        if (!NeedsRefresh(latestEntry, refreshSkew))
+        {
+            OidcTokenProviderLog.RefreshedTokensReusedAfterConcurrentUpdate(logger, activeProviderOptions.Value.ProviderName, downstreamApiName);
+            return latestEntry!.AccessToken;
+        }
+
+        if (refreshException is OidcReauthenticationRequiredException && SessionRefreshSourceMatches(latestState, sourceVersion, sourceRefreshToken))
+        {
+            throw refreshException;
+        }
+
+        throw refreshException as OidcTokenRefreshFailedException
+            ?? new OidcTokenRefreshFailedException("Refresh token exchange failed and no newer usable token state was found.", refreshException);
+    }
+
+    private OidcSessionState CreateMergedRefreshedState(
+        OidcSessionState? latestState,
+        string apiTokenKey,
+        RefreshResult refreshResult,
+        string sourceRefreshToken,
+        DateTimeOffset refreshCompletedUtc)
+    {
+        var nextState = (latestState ?? new OidcSessionState()).Clone();
+        nextState.ApiTokens[apiTokenKey] = refreshResult.ApiToken.Clone();
+
+        if (string.Equals(nextState.SessionTokens?.RefreshToken, sourceRefreshToken, StringComparison.Ordinal))
+        {
+            nextState.SessionTokens = refreshResult.SessionTokenSet.Clone();
+        }
+
+        nextState.LastRefreshUtc = nextState.LastRefreshUtc is { } lastRefreshUtc && lastRefreshUtc > refreshCompletedUtc
+            ? lastRefreshUtc
+            : refreshCompletedUtc;
+        return nextState;
+    }
+
+    private bool RefreshLeaseExpired(IOidcSessionRefreshLockLease refreshLock, string downstreamApiName)
+    {
+        if (refreshLock.ExpiresAtUtc == DateTimeOffset.MaxValue)
+        {
+            return false;
+        }
+
+        if (timeProvider.GetUtcNow() <= refreshLock.ExpiresAtUtc)
+        {
+            return false;
+        }
+
+        OidcTokenProviderLog.RefreshLockLeaseExpired(logger, activeProviderOptions.Value.ProviderName, downstreamApiName);
+        return true;
+    }
+
+    private static bool SessionRefreshSourceMatches(
+        VersionedOidcSessionState? latestState,
+        string? sourceVersion,
+        string? sourceRefreshToken)
+    {
+        return string.Equals(latestState?.Version, sourceVersion, StringComparison.Ordinal) &&
+            string.Equals(latestState?.State.SessionTokens?.RefreshToken, sourceRefreshToken, StringComparison.Ordinal);
     }
 
     private void ApplyClientAuthentication(IDictionary<string, string> formValues, string tokenEndpoint)

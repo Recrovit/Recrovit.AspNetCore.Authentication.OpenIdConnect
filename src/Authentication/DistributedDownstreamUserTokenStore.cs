@@ -15,22 +15,60 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 /// This implementation is suitable for single-instance deployments unless the host replaces it with a store that provides
 /// cross-node atomic compare-and-swap guarantees.
 /// </summary>
-public sealed class DistributedDownstreamUserTokenStore(
-    IDistributedCache distributedCache,
-    IDataProtectionProvider dataProtectionProvider,
-    IOptions<TokenCacheOptions> tokenCacheOptions,
-    IOptions<ActiveOidcProviderOptions> activeProviderOptions,
-    ILogger<DistributedDownstreamUserTokenStore> logger) : IDownstreamUserTokenStore, IOidcSessionStateStore
+public sealed class DistributedDownstreamUserTokenStore : IDownstreamUserTokenStore, IOidcSessionStateStore
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
     private const string CachePayloadVersion = "v2";
+    private readonly IDistributedCache distributedCache;
+    private readonly IOptions<TokenCacheOptions> tokenCacheOptions;
+    private readonly ILogger<DistributedDownstreamUserTokenStore> logger;
+    private readonly TimeProvider timeProvider;
     private readonly object syncRoot = new();
     private readonly Dictionary<string, SemaphoreSlim> updateLocks = new(StringComparer.Ordinal);
-    private readonly UserTokenCacheKeyContextAccessor cacheKeyContextAccessor = new(activeProviderOptions);
-    private readonly UserTokenCacheKeyProtector cacheKeyProtector = new(tokenCacheOptions);
-    private readonly IDataProtector protector = dataProtectionProvider.CreateProtector(
-        "Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication.DistributedDownstreamUserTokenStore",
-        CachePayloadVersion);
+    private readonly UserTokenCacheKeyContextAccessor cacheKeyContextAccessor;
+    private readonly UserTokenCacheKeyProtector cacheKeyProtector;
+    private readonly IDataProtector protector;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DistributedDownstreamUserTokenStore"/> class.
+    /// </summary>
+    public DistributedDownstreamUserTokenStore(
+        IDistributedCache distributedCache,
+        IDataProtectionProvider dataProtectionProvider,
+        IOptions<TokenCacheOptions> tokenCacheOptions,
+        IOptions<ActiveOidcProviderOptions> activeProviderOptions,
+        ILogger<DistributedDownstreamUserTokenStore> logger)
+        : this(
+            distributedCache,
+            dataProtectionProvider,
+            tokenCacheOptions,
+            activeProviderOptions,
+            logger,
+            TimeProvider.System)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DistributedDownstreamUserTokenStore"/> class.
+    /// </summary>
+    public DistributedDownstreamUserTokenStore(
+        IDistributedCache distributedCache,
+        IDataProtectionProvider dataProtectionProvider,
+        IOptions<TokenCacheOptions> tokenCacheOptions,
+        IOptions<ActiveOidcProviderOptions> activeProviderOptions,
+        ILogger<DistributedDownstreamUserTokenStore> logger,
+        TimeProvider timeProvider)
+    {
+        this.distributedCache = distributedCache;
+        this.tokenCacheOptions = tokenCacheOptions;
+        this.logger = logger;
+        this.timeProvider = timeProvider;
+        cacheKeyContextAccessor = new UserTokenCacheKeyContextAccessor(activeProviderOptions);
+        cacheKeyProtector = new UserTokenCacheKeyProtector(tokenCacheOptions);
+        protector = dataProtectionProvider.CreateProtector(
+            "Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication.DistributedDownstreamUserTokenStore",
+            CachePayloadVersion);
+    }
 
     /// <inheritdoc />
     public async Task<VersionedOidcSessionState?> GetSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
@@ -222,8 +260,9 @@ public sealed class DistributedDownstreamUserTokenStore(
     {
         var json = JsonSerializer.Serialize(payload, SerializerOptions);
         var protectedPayload = protector.Protect(json);
-        var ttl = expiresAtUtc > DateTimeOffset.UtcNow
-            ? expiresAtUtc - DateTimeOffset.UtcNow + TimeSpan.FromHours(12)
+        var utcNow = timeProvider.GetUtcNow();
+        var ttl = expiresAtUtc > utcNow
+            ? expiresAtUtc - utcNow + TimeSpan.FromHours(12)
             : TimeSpan.FromHours(12);
 
         await distributedCache.SetStringAsync(
@@ -275,7 +314,7 @@ public sealed class DistributedDownstreamUserTokenStore(
         }
 
         return expirations.Count == 0
-            ? DateTimeOffset.UtcNow.AddHours(12)
+            ? timeProvider.GetUtcNow().AddHours(12)
             : expirations.Max();
     }
 

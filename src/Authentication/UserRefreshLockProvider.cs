@@ -5,15 +5,11 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 
 internal sealed class UserRefreshLockProvider(
-    IOptions<ActiveOidcProviderOptions> activeProviderOptions,
-    IOptions<TokenCacheOptions> tokenCacheOptions,
-    TimeProvider timeProvider) : IOidcSessionRefreshLockProvider
+    IOptions<ActiveOidcProviderOptions> activeProviderOptions) : IOidcSessionRefreshLockProvider
 {
     private readonly object syncRoot = new();
     private readonly Dictionary<string, LockEntry> entries = new(StringComparer.Ordinal);
     private readonly UserTokenCacheKeyContextAccessor cacheKeyContextAccessor = new(activeProviderOptions);
-    private readonly TimeProvider timeProvider = timeProvider;
-    private readonly TimeSpan leaseDuration = TimeSpan.FromSeconds(tokenCacheOptions.Value.RefreshLockLeaseSeconds);
 
     public async Task<IOidcSessionRefreshLockLease> AcquireAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
@@ -38,7 +34,7 @@ internal sealed class UserRefreshLockProvider(
             userKey,
             entry,
             Guid.NewGuid().ToString("n"),
-            timeProvider.GetUtcNow().Add(leaseDuration));
+            DateTimeOffset.MaxValue);
     }
 
     private void Release(string userKey, LockEntry entry)

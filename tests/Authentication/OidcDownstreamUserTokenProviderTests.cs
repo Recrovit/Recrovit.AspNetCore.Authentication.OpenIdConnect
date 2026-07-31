@@ -394,43 +394,85 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     [Fact]
-    public async Task GetAccessTokenAsync_ReusesLatestStoredToken_WhenCompareAndSwapLosesConcurrentUpdate()
+    public async Task GetAccessTokenAsync_MergesLatestStoredState_WhenCompareAndSwapLosesConcurrentUpdates()
     {
         var user = TestUsers.CreateAuthenticatedUser();
+        var timeProvider = new FixedTimeProvider(DateTimeOffset.Parse("2026-07-31T10:00:00Z"));
         var tokenStore = new CompareAndSwapConflictSessionStateStore(
-            user,
-            new StoredOidcSessionTokenSet
+            new OidcSessionState
             {
-                RefreshToken = "refresh-token",
-                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+                SessionTokens = new StoredOidcSessionTokenSet
+                {
+                    RefreshToken = "refresh-token",
+                    ExpiresAtUtc = timeProvider.GetUtcNow().AddHours(1)
+                },
+                ApiTokens = new Dictionary<string, CachedDownstreamApiTokenEntry>(StringComparer.Ordinal)
+                {
+                    [CreateApiKey("GraphApi", ["graph.read"])] = new CachedDownstreamApiTokenEntry
+                    {
+                        AccessToken = "graph-token-0",
+                        ExpiresAtUtc = timeProvider.GetUtcNow().AddMinutes(2)
+                    }
+                },
+                LastRefreshUtc = timeProvider.GetUtcNow().AddMinutes(-2)
             },
-            new CachedDownstreamApiTokenEntry
-            {
-                AccessToken = "concurrent-token",
-                ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
-            },
-            new StoredOidcSessionTokenSet
-            {
-                RefreshToken = "rotated-refresh-token",
-                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
-            });
-        var loggerFactory = new ListLoggerFactory();
+            [
+                new OidcSessionState
+                {
+                    SessionTokens = new StoredOidcSessionTokenSet
+                    {
+                        RefreshToken = "rotated-refresh-token",
+                        ExpiresAtUtc = timeProvider.GetUtcNow().AddHours(1)
+                    },
+                    ApiTokens = new Dictionary<string, CachedDownstreamApiTokenEntry>(StringComparer.Ordinal)
+                    {
+                        [CreateApiKey("GraphApi", ["graph.read"])] = new CachedDownstreamApiTokenEntry
+                        {
+                            AccessToken = "graph-token-1",
+                            ExpiresAtUtc = timeProvider.GetUtcNow().AddMinutes(3)
+                        }
+                    },
+                    LastRefreshUtc = timeProvider.GetUtcNow().AddMinutes(-1)
+                },
+                new OidcSessionState
+                {
+                    SessionTokens = new StoredOidcSessionTokenSet
+                    {
+                        RefreshToken = "rotated-refresh-token",
+                        ExpiresAtUtc = timeProvider.GetUtcNow().AddHours(1)
+                    },
+                    ApiTokens = new Dictionary<string, CachedDownstreamApiTokenEntry>(StringComparer.Ordinal)
+                    {
+                        [CreateApiKey("GraphApi", ["graph.read"])] = new CachedDownstreamApiTokenEntry
+                        {
+                            AccessToken = "graph-token-2",
+                            ExpiresAtUtc = timeProvider.GetUtcNow().AddMinutes(4)
+                        }
+                    },
+                    LastRefreshUtc = timeProvider.GetUtcNow().AddSeconds(-30)
+                }
+            ]);
+        var handler = new CaptureRequestHandler(CreateTokenResponse(
+            accessToken: "fresh-token",
+            refreshToken: "fresh-refresh"));
         var provider = CreateProvider(
             tokenStore,
-            new StubHttpClientFactory(CreateTokenResponse(
-                accessToken: "fresh-token",
-                refreshToken: "fresh-refresh")),
-            loggerFactory: loggerFactory);
+            new DelegatingHttpClientFactory(handler),
+            timeProvider: timeProvider);
 
         var token = await provider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None);
 
-        Assert.Equal("concurrent-token", token);
-        Assert.Equal(1, tokenStore.CompareAndSwapAttempts);
-        Assert.Contains(loggerFactory.Entries, entry => entry.EventId.Name == "RefreshedTokensReusedAfterConcurrentUpdate");
+        Assert.Equal("fresh-token", token);
+        Assert.Equal(1, handler.RequestCount);
+        Assert.Equal(3, tokenStore.CompareAndSwapAttempts);
+        Assert.Equal("fresh-token", tokenStore.CurrentState.State.ApiTokens[CreateApiKey("SessionValidationApi", ["openid"])].AccessToken);
+        Assert.Equal("graph-token-2", tokenStore.CurrentState.State.ApiTokens[CreateApiKey("GraphApi", ["graph.read"])].AccessToken);
+        Assert.Equal("rotated-refresh-token", tokenStore.CurrentState.State.SessionTokens!.RefreshToken);
+        Assert.Equal(timeProvider.GetUtcNow(), tokenStore.CurrentState.State.LastRefreshUtc);
     }
 
     [Fact]
-    public async Task GetAccessTokenAsync_DoesNotPersistRefreshResult_WhenLeaseExpiresBeforeWrite()
+    public async Task GetAccessTokenAsync_PersistsRefreshResult_WhenLocalLockDoesNotExpireByTime()
     {
         var user = TestUsers.CreateAuthenticatedUser();
         var tokenStore = new InMemoryTokenStore(user, new StoredOidcSessionTokenSet
@@ -440,22 +482,81 @@ public sealed class OidcDownstreamUserTokenProviderTests
         });
         var timeProvider = new MutableTimeProvider(DateTimeOffset.UtcNow);
         var loggerFactory = new ListLoggerFactory();
+        var handler = new AdvanceTimeHandler(
+            CreateTokenResponse(accessToken: "fresh-token", refreshToken: "fresh-refresh"),
+            timeProvider,
+            TimeSpan.FromSeconds(5));
         var provider = CreateProvider(
             tokenStore,
-            new DelegatingHttpClientFactory(new AdvanceTimeHandler(
-                CreateTokenResponse(accessToken: "fresh-token", refreshToken: "fresh-refresh"),
-                timeProvider,
-                TimeSpan.FromSeconds(5))),
+            new DelegatingHttpClientFactory(handler),
             loggerFactory: loggerFactory,
-            refreshLockProvider: new FixedLeaseRefreshLockProvider("lease-owner", timeProvider.GetUtcNow().AddSeconds(1)),
             timeProvider: timeProvider);
 
-        var exception = await Assert.ThrowsAsync<OidcTokenRefreshFailedException>(() =>
-            provider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None));
+        var token = await provider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None);
 
-        Assert.Contains("could not be persisted", exception.Message, StringComparison.Ordinal);
-        Assert.Null(await tokenStore.GetApiTokenAsync(user, "SessionValidationApi", ["openid"], CancellationToken.None));
-        Assert.Contains(loggerFactory.Entries, entry => entry.EventId.Name == "RefreshLockLeaseExpired");
+        Assert.Equal("fresh-token", token);
+        Assert.Equal(1, handler.RequestCount);
+        Assert.Equal("fresh-refresh", tokenStore.StoredSessionTokenSet!.RefreshToken);
+        Assert.Equal("fresh-token", (await tokenStore.GetApiTokenAsync(user, "SessionValidationApi", ["openid"], CancellationToken.None))!.AccessToken);
+        Assert.DoesNotContain(loggerFactory.Entries, entry => entry.EventId.Name == "RefreshLockLeaseExpired");
+    }
+
+    [Fact]
+    public async Task GetAccessTokenAsync_ReusesConcurrentTokenOrReauthenticates_WhenRefreshFailsWithInvalidGrant()
+    {
+        var user = TestUsers.CreateAuthenticatedUser();
+        var concurrentStore = new InMemoryTokenStore(user, new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+        });
+        var concurrentHandler = new CallbackHttpMessageHandler(() =>
+        {
+            concurrentStore.StoreSessionTokenSetAsync(
+                user,
+                new StoredOidcSessionTokenSet
+                {
+                    RefreshToken = "rotated-refresh-token",
+                    ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+                },
+                CancellationToken.None).GetAwaiter().GetResult();
+            concurrentStore.StoreApiTokenAsync(
+                user,
+                "SessionValidationApi",
+                ["openid"],
+                new CachedDownstreamApiTokenEntry
+                {
+                    AccessToken = "concurrent-token",
+                    ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+                },
+                CancellationToken.None).GetAwaiter().GetResult();
+            return new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(CreateErrorResponse(OidcAuthenticationConstants.OAuthErrors.InvalidGrant))
+            };
+        });
+        var concurrentProvider = CreateProvider(
+            concurrentStore,
+            new DelegatingHttpClientFactory(concurrentHandler));
+
+        var reusedToken = await concurrentProvider.GetAccessTokenAsync(user, "SessionValidationApi", CancellationToken.None);
+
+        Assert.Equal("concurrent-token", reusedToken);
+
+        var provider = CreateProvider(
+            new InMemoryTokenStore(new StoredOidcSessionTokenSet
+            {
+                RefreshToken = "refresh-token",
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
+            }),
+            new StubHttpClientFactory(
+                CreateErrorResponse(OidcAuthenticationConstants.OAuthErrors.InvalidGrant),
+                HttpStatusCode.BadRequest));
+
+        var ex = await Assert.ThrowsAsync<OidcReauthenticationRequiredException>(() =>
+            provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None));
+
+        Assert.Contains("Refresh token exchange failed", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -497,25 +598,6 @@ public sealed class OidcDownstreamUserTokenProviderTests
             provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None));
 
         Assert.Contains("No stored token set", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task GetAccessTokenAsync_ThrowsReauthenticationRequired_WhenRefreshFailsWithInvalidGrant()
-    {
-        var provider = CreateProvider(
-            new InMemoryTokenStore(new StoredOidcSessionTokenSet
-            {
-                RefreshToken = "refresh-token",
-                ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
-            }),
-            new StubHttpClientFactory(
-                CreateErrorResponse(OidcAuthenticationConstants.OAuthErrors.InvalidGrant),
-                HttpStatusCode.BadRequest));
-
-        var ex = await Assert.ThrowsAsync<OidcReauthenticationRequiredException>(() =>
-            provider.GetAccessTokenAsync(TestUsers.CreateAuthenticatedUser(), "SessionValidationApi", CancellationToken.None));
-
-        Assert.Contains("Refresh token exchange failed", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -768,6 +850,18 @@ public sealed class OidcDownstreamUserTokenProviderTests
     private static string CreateJwtAccessToken((string Name, string Value) claim)
         => CreateJwtAccessToken([claim]);
 
+    private static string CreateApiKey(string downstreamApiName, IReadOnlyCollection<string> scopes)
+    {
+        var normalizedScopes = scopes
+            .Where(scope => !string.IsNullOrWhiteSpace(scope))
+            .Select(scope => scope.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(scope => scope, StringComparer.Ordinal);
+        var serializedScopes = string.Join(" ", normalizedScopes);
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(serializedScopes));
+        return $"{downstreamApiName}:{Convert.ToHexString(hash)}";
+    }
+
     private static string CreateTokenResponse(string accessToken, string? refreshToken = null)
     {
         var response = new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -833,8 +927,13 @@ public sealed class OidcDownstreamUserTokenProviderTests
         MutableTimeProvider timeProvider,
         TimeSpan advanceBy) : HttpMessageHandler
     {
+        private int requestCount;
+
+        public int RequestCount => Volatile.Read(ref requestCount);
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            Interlocked.Increment(ref requestCount);
             timeProvider.Advance(advanceBy);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
@@ -843,33 +942,29 @@ public sealed class OidcDownstreamUserTokenProviderTests
         }
     }
 
+    private sealed class CallbackHttpMessageHandler(Func<HttpResponseMessage> responseFactory) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(responseFactory());
+    }
+
     private sealed class CompareAndSwapConflictSessionStateStore : IDownstreamUserTokenStore, IOidcSessionStateStore
     {
-        private readonly string apiKey;
         private string version = "v1";
         private OidcSessionState state;
+        private readonly Queue<OidcSessionState> conflictStates;
 
         public CompareAndSwapConflictSessionStateStore(
-            ClaimsPrincipal user,
-            StoredOidcSessionTokenSet initialSessionTokenSet,
-            CachedDownstreamApiTokenEntry replacementTokenEntry,
-            StoredOidcSessionTokenSet replacementSessionTokenSet)
+            OidcSessionState initialState,
+            IReadOnlyCollection<OidcSessionState> conflictStates)
         {
-            apiKey = CreateApiKey("SessionValidationApi", ["openid"]);
-            state = new OidcSessionState
-            {
-                SessionTokens = Clone(initialSessionTokenSet),
-                ApiTokens = new Dictionary<string, CachedDownstreamApiTokenEntry>(StringComparer.Ordinal)
-            };
-            ReplacementTokenEntry = replacementTokenEntry;
-            ReplacementSessionTokenSet = replacementSessionTokenSet;
+            state = Clone(initialState);
+            this.conflictStates = new Queue<OidcSessionState>(conflictStates.Select(Clone));
         }
 
         public int CompareAndSwapAttempts { get; private set; }
 
-        private CachedDownstreamApiTokenEntry ReplacementTokenEntry { get; }
-
-        private StoredOidcSessionTokenSet ReplacementSessionTokenSet { get; }
+        public VersionedOidcSessionState CurrentState => new(version, Clone(state));
 
         public Task<StoredOidcSessionTokenSet?> GetSessionTokenSetAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
             => Task.FromResult(state.SessionTokens is null ? null : Clone(state.SessionTokens));
@@ -882,10 +977,14 @@ public sealed class OidcDownstreamUserTokenProviderTests
         }
 
         public Task<CachedDownstreamApiTokenEntry?> GetApiTokenAsync(ClaimsPrincipal user, string downstreamApiName, IReadOnlyCollection<string> scopes, CancellationToken cancellationToken)
-            => Task.FromResult(state.ApiTokens.TryGetValue(apiKey, out var token) ? Clone(token) : null);
+        {
+            var apiKey = CreateApiKey(downstreamApiName, scopes);
+            return Task.FromResult(state.ApiTokens.TryGetValue(apiKey, out var token) ? Clone(token) : null);
+        }
 
         public Task StoreApiTokenAsync(ClaimsPrincipal user, string downstreamApiName, IReadOnlyCollection<string> scopes, CachedDownstreamApiTokenEntry tokenEntry, CancellationToken cancellationToken)
         {
+            var apiKey = CreateApiKey(downstreamApiName, scopes);
             state.ApiTokens[apiKey] = Clone(tokenEntry);
             version = Guid.NewGuid().ToString("n");
             return Task.CompletedTask;
@@ -904,16 +1003,9 @@ public sealed class OidcDownstreamUserTokenProviderTests
         public Task<bool> TryCompareAndSwapSessionStateAsync(ClaimsPrincipal user, string? expectedVersion, OidcSessionState newState, CancellationToken cancellationToken)
         {
             CompareAndSwapAttempts++;
-            if (CompareAndSwapAttempts == 1)
+            if (conflictStates.Count > 0)
             {
-                state = new OidcSessionState
-                {
-                    SessionTokens = Clone(ReplacementSessionTokenSet),
-                    ApiTokens = new Dictionary<string, CachedDownstreamApiTokenEntry>(StringComparer.Ordinal)
-                    {
-                        [apiKey] = Clone(ReplacementTokenEntry)
-                    }
-                };
+                state = conflictStates.Dequeue();
                 version = Guid.NewGuid().ToString("n");
                 return Task.FromResult(false);
             }
@@ -930,18 +1022,6 @@ public sealed class OidcDownstreamUserTokenProviderTests
 
         public Task DeleteSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
             => RemoveAsync(user, cancellationToken);
-
-        private static string CreateApiKey(string downstreamApiName, IReadOnlyCollection<string> scopes)
-        {
-            var normalizedScopes = scopes
-                .Where(scope => !string.IsNullOrWhiteSpace(scope))
-                .Select(scope => scope.Trim())
-                .Distinct(StringComparer.Ordinal)
-                .OrderBy(scope => scope, StringComparer.Ordinal);
-            var serializedScopes = string.Join(" ", normalizedScopes);
-            var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(serializedScopes));
-            return $"{downstreamApiName}:{Convert.ToHexString(hash)}";
-        }
 
         private static StoredOidcSessionTokenSet Clone(StoredOidcSessionTokenSet tokenSet)
         {

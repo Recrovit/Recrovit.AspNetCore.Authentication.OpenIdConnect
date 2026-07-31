@@ -157,9 +157,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddSingleton(downstreamApiCatalog);
         services.AddSingleton(scopeResolver);
         services.AddSingleton<IOidcSessionRefreshLockProvider>(serviceProvider => new UserRefreshLockProvider(
-            serviceProvider.GetRequiredService<IOptions<ActiveOidcProviderOptions>>(),
-            serviceProvider.GetRequiredService<IOptions<TokenCacheOptions>>(),
-            serviceProvider.GetRequiredService<TimeProvider>()));
+            serviceProvider.GetRequiredService<IOptions<ActiveOidcProviderOptions>>()));
         services.AddSingleton<ICertificateStoreReader, WindowsCertificateStoreReader>();
         services.AddSingleton<IOidcClientCertificateLoader, OidcClientCertificateLoader>();
         services.AddSingleton<IOidcClientAssertionService, OidcPrivateKeyJwtClientAssertionService>();
@@ -368,7 +366,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
                         OidcSessionTimeoutMetadata.StampSessionLifetime(principal, hostOptions, timeProvider);
                         await tokenStore.StoreSessionTokenSetAsync(
                             principal,
-                            StoredOidcSessionTokenSet.FromAuthenticationProperties(authenticationProperties),
+                            StoredOidcSessionTokenSet.FromAuthenticationProperties(authenticationProperties, timeProvider),
                             context.HttpContext.RequestAborted);
                         OidcInfrastructureLog.SessionTokenPersisted(ticketLogger, activeProviderName);
 

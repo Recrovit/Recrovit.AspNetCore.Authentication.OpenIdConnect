@@ -29,10 +29,19 @@ public sealed class StoredOidcSessionTokenSet
     /// <param name="properties">The authentication properties containing the tokens returned by the identity provider.</param>
     /// <returns>A stored session token set initialized from the authentication properties.</returns>
     public static StoredOidcSessionTokenSet FromAuthenticationProperties(AuthenticationProperties properties)
+        => FromAuthenticationProperties(properties, TimeProvider.System);
+
+    /// <summary>
+    /// Creates a stored session token set from OIDC authentication properties.
+    /// </summary>
+    /// <param name="properties">The authentication properties containing the tokens returned by the identity provider.</param>
+    /// <param name="timeProvider">The time provider used to derive fallback expiry values.</param>
+    /// <returns>A stored session token set initialized from the authentication properties.</returns>
+    public static StoredOidcSessionTokenSet FromAuthenticationProperties(AuthenticationProperties properties, TimeProvider timeProvider)
     {
         var tokens = properties.GetTokens().ToDictionary(token => token.Name!, token => token.Value, StringComparer.Ordinal);
 
-        var expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5);
+        var expiresAtUtc = timeProvider.GetUtcNow().AddMinutes(5);
         if (tokens.TryGetValue(OidcAuthenticationConstants.TokenNames.ExpiresAt, out var expiresAtRaw) &&
             DateTimeOffset.TryParse(expiresAtRaw, out var parsedExpiresAt))
         {

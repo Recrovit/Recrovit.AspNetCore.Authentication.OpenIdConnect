@@ -499,6 +499,9 @@ internal sealed class CaptureRequestHandler(
 {
     private static readonly string DefaultPayload =
         $$"""{"access_token":"captured-token","{{OidcAuthenticationConstants.TokenNames.ExpiresIn}}":120}""";
+    private int requestCount;
+
+    public int RequestCount => Volatile.Read(ref requestCount);
 
     public HttpRequestMessage? LastRequest { get; private set; }
 
@@ -506,6 +509,7 @@ internal sealed class CaptureRequestHandler(
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        Interlocked.Increment(ref requestCount);
         LastRequest = request;
         LastRequestContent = request.Content is null
             ? null
