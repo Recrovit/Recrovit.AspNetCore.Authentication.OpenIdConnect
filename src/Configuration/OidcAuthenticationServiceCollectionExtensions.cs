@@ -119,6 +119,13 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 options => string.IsNullOrWhiteSpace(options.SessionValidationDownstreamApiName)
                     || downstreamApiCatalog.Apis.ContainsKey(options.SessionValidationDownstreamApiName),
                 $"{hostSection.Path}:SessionValidationDownstreamApiName must reference a configured entry in {downstreamApisSection.Path}.")
+            .Validate(
+                options => string.IsNullOrWhiteSpace(options.DownstreamProxyGetProtection.CustomHeaderName)
+                    == string.IsNullOrWhiteSpace(options.DownstreamProxyGetProtection.CustomHeaderValue),
+                $"{hostSection.Path}:DownstreamProxyGetProtection requires both CustomHeaderName and CustomHeaderValue when either is configured.")
+            .Validate(
+                options => options.DownstreamProxyGetProtection.AllowedOrigins.All(IsValidOrigin),
+                $"{hostSection.Path}:DownstreamProxyGetProtection:AllowedOrigins must contain only absolute HTTP or HTTPS origins.")
             .ValidateOnStart();
 
         services.AddOptions<HostSecurityOptions>()
@@ -146,6 +153,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddHttpClient();
         services.AddHttpClient<IDownstreamHttpProxyClient, DownstreamHttpProxyClient>();
         services.AddSingleton<ProxyEndpointMatcher>();
+        services.AddSingleton<IDownstreamProxyGetRequestProtectionEvaluator, DownstreamProxyGetRequestProtectionEvaluator>();
         services.AddScoped<IDownstreamTransportProxyClient, DownstreamTransportProxyClient>();
 
         services.AddScoped<DistributedDownstreamUserTokenStore>();
@@ -394,6 +402,22 @@ public static class OidcAuthenticationServiceCollectionExtensions
         return !string.IsNullOrWhiteSpace(path) &&
             path.StartsWith("/", StringComparison.Ordinal) &&
             !path.StartsWith("//", StringComparison.Ordinal);
+    }
+
+    private static bool IsValidOrigin(string? origin)
+    {
+        if (string.IsNullOrWhiteSpace(origin) || !Uri.TryCreate(origin, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        if (!uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            && !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return string.IsNullOrEmpty(uri.PathAndQuery) || uri.PathAndQuery == "/";
     }
 
     private static void EnsureLocalSessionIdClaim(ClaimsPrincipal principal)

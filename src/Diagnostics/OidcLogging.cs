@@ -56,6 +56,8 @@ internal static class OidcLogEvents
 
     public static readonly EventId AuthorizationRedirectSuppressed = new(6000, nameof(AuthorizationRedirectSuppressed));
     public static readonly EventId AuthorizationStatusCodeWritten = new(6001, nameof(AuthorizationStatusCodeWritten));
+
+    public static readonly EventId DownstreamProxyGetRequestRejected = new(7000, nameof(DownstreamProxyGetRequestRejected));
 }
 
 internal static class OidcLogScopes
@@ -253,4 +255,10 @@ internal static partial class OidcAuthorizationLog
 
     [LoggerMessage(EventId = 6001, Level = LogLevel.Information, Message = "Authentication middleware wrote status code instead of redirect. StatusCode={StatusCode}, Reason={Reason}")]
     public static partial void AuthorizationStatusCodeWritten(ILogger logger, int statusCode, string reason);
+}
+
+internal static partial class OidcProxyLog
+{
+    [LoggerMessage(EventId = 7000, Level = LogLevel.Warning, Message = "Rejected downstream proxy HTTP GET request before outbound dispatch. Path={Path}, Reason={Reason}")]
+    public static partial void DownstreamProxyGetRequestRejected(ILogger logger, string path, string reason);
 }

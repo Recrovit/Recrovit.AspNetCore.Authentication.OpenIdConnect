@@ -182,6 +182,7 @@ Behavior:
 - the downstream base URL, scopes, and configured `RelativePath` come from the matching `DownstreamApiDefinition`
 - the host acquires or refreshes the signed-in user's downstream access token through `IDownstreamUserTokenProvider`
 - the request is forwarded through the built-in downstream HTTP proxy infrastructure
+- cookie-authenticated downstream proxy `GET` requests are protected against cross-site browser initiation by default
 - API-style authorization behavior is preserved, so unauthorized proxy requests return `401` or `403` instead of redirecting to login
 
 This capability is intentionally generic. It is useful for BFF-style hosts, server-proxy architectures, and any application that wants to expose downstream APIs through a cookie-authenticated OIDC host without re-implementing proxy routing.
@@ -209,6 +210,46 @@ With this configuration:
 - `GET /downstream/UserInfoApi` forwards to the configured `RelativePath` for `UserInfoApi`
 - `GET /downstream/UserInfoApi/some/extra/path?x=1` appends `some/extra/path?x=1` after the configured route prefix
 - request bodies are forwarded for the supported HTTP methods, including `POST`, `PUT`, `PATCH`, and `DELETE`
+
+### Downstream Proxy GET Browser Protection
+
+The host options include `Recrovit:OpenIdConnect:Host:DownstreamProxyGetProtection` for the generic downstream HTTP proxy.
+
+Default behavior:
+
+- protection is enabled by default
+- only HTTP `GET` proxy requests are checked
+- WebSocket proxy handshakes are not changed by this policy
+- `Sec-Fetch-Site` is the primary signal
+- when Fetch Metadata headers are unavailable, the host can fall back to a same-origin `Origin` header or to a configured custom request header
+
+Recommended frontend behavior for compatibility paths:
+
+- for browser-based same-origin calls, let the browser send `Sec-Fetch-Site` naturally
+- for older clients that do not send Fetch Metadata, send a same-origin `Origin` header when possible
+- if neither header is available, configure a custom header such as `X-Recrovit-Proxy-Intent` and send the expected value from the trusted frontend
+
+Example:
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Host": {
+        "DownstreamProxyGetProtection": {
+          "Enabled": true,
+          "Mode": "FetchMetadataFirst",
+          "AllowOriginFallback": true,
+          "CustomHeaderName": "X-Recrovit-Proxy-Intent",
+          "CustomHeaderValue": "same-site"
+        }
+      }
+    }
+  }
+}
+```
+
+This protection is a browser-request defense for the generic proxy surface. It does not replace endpoint authorization.
 
 ### `Recrovit:OpenIdConnect:TokenCache`
 

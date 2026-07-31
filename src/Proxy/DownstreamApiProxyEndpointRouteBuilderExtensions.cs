@@ -42,6 +42,7 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
         string apiName,
         string? path,
         DownstreamApiCatalog downstreamApiCatalog,
+        IDownstreamProxyGetRequestProtectionEvaluator getRequestProtectionEvaluator,
         IDownstreamHttpProxyClient httpProxyClient,
         IDownstreamTransportProxyClient transportProxyClient,
         CancellationToken cancellationToken)
@@ -49,6 +50,11 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
         if (!downstreamApiCatalog.Apis.ContainsKey(apiName))
         {
             return Results.NotFound();
+        }
+
+        if (!getRequestProtectionEvaluator.IsRequestAllowed(context, out _))
+        {
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
         }
 
         var pathAndQuery = BuildPathAndQuery(path, context.Request.QueryString);

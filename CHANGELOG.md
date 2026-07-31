@@ -21,6 +21,10 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Enforced absolute `https` downstream API base URLs during startup validation in `Production` so proxied WebSocket connections can only resolve to `wss` targets there.
   - Blocked downstream `Set-Cookie` forwarding by default to prevent host-origin cookie injection from proxied responses.
   - Removed hop-by-hop response headers, including headers declared dynamically through `Connection`, before writing proxied downstream responses back to callers.
+- Downstream proxy browser-origin protection
+  - Added secure-by-default browser-origin protection for cookie-authenticated downstream proxy HTTP `GET` requests.
+  - Uses `Sec-Fetch-Site` as the primary signal and can fall back to a same-origin `Origin` header or a configured custom request header when Fetch Metadata is unavailable.
+  - Rejects blocked proxy `GET` requests with `403 Forbidden` before any outbound downstream request is created.
 - Session token refresh concurrency and cache hardening
   - Reworked stored token persistence around a single versioned session payload so refresh token rotation and downstream API token updates are coordinated through compare-and-swap writes.
   - Changed refresh coordination from per-API in-process locking to session-scoped locking with lease metadata, and wired the provider refresh flow to re-read and retry on concurrent state changes.
@@ -35,6 +39,7 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 - Proxy regression coverage
   - Added proxy tests for valid relative path handling, origin preservation, empty-path behavior, and rejection of unsafe proxy path forms.
   - Expanded regression coverage for encoded separators, backslash variants, port-switch attempts, transport/WebSocket path validation, and downstream `Set-Cookie` injection filtering.
+  - Added regression coverage for allowed same-site proxy `GET` requests, blocked cross-site browser `GET` requests, and custom-header fallback behavior.
 - Token state architecture and documentation
   - Added `IOidcSessionStateStore`, versioned session-state types, HMAC cache-key derivation, and configuration coverage for the new token-state model.
   - Updated token lifecycle and production configuration documentation to describe the session-aggregate store, shared HMAC secret requirement, and multi-instance refresh coordination expectations.

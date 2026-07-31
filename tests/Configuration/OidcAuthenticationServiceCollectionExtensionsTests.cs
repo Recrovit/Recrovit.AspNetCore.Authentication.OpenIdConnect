@@ -94,6 +94,23 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesDefaultDownstreamProxyGetProtection()
+    {
+        var configuration = TestConfiguration.Build();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value;
+
+        Assert.True(options.DownstreamProxyGetProtection.Enabled);
+        Assert.Equal(ProxyGetRequestProtectionMode.FetchMetadataFirst, options.DownstreamProxyGetProtection.Mode);
+        Assert.True(options.DownstreamProxyGetProtection.AllowOriginFallback);
+        Assert.Empty(options.DownstreamProxyGetProtection.AllowedOrigins);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_UsesDefaultSessionTimeoutPolicy()
     {
         var configuration = TestConfiguration.Build();
@@ -171,6 +188,42 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
             serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
 
         Assert.Contains("RemoteFailureRedirectPath", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyGetProtectionCustomHeaderPair()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyGetProtection:CustomHeaderName"] = "X-Recrovit-Proxy-Intent"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
+
+        Assert.Contains("DownstreamProxyGetProtection", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyGetProtectionAllowedOrigins()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyGetProtection:AllowedOrigins:0"] = "javascript:alert(1)"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
+
+        Assert.Contains("AllowedOrigins", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

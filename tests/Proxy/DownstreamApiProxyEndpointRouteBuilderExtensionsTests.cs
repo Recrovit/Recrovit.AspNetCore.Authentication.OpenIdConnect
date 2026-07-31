@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
@@ -27,6 +28,7 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         await using var app = await CreateApplicationAsync(proxyClient, transportProxyClient);
         using var client = app.GetTestClient();
 
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
         using var response = await client.GetAsync("/downstream/GraphApi/me?expand=roles", TestContext.Current.CancellationToken);
         using var emptyPathResponse = await client.GetAsync("/downstream/GraphApi?expand=roles", TestContext.Current.CancellationToken);
         using var absolutePathResponse = await client.GetAsync("/downstream/GraphApi/https://attacker.example/collect", TestContext.Current.CancellationToken);
@@ -55,6 +57,131 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         Assert.Equal(0, transportProxyClient.CallCount);
     }
 
+    [Theory]
+    [InlineData("same-origin")]
+    [InlineData("same-site")]
+    [InlineData("none")]
+    public async Task MapDownstreamApiProxyEndpoints_AllowsGet_WhenFetchMetadataAllowsIt(string fetchMetadataSite)
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient);
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", fetchMetadataSite);
+
+        using var response = await client.GetAsync("/downstream/GraphApi/me", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, proxyClient.CallCount);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_RejectsCrossSiteGet_WhenFetchMetadataIndicatesCrossSite()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient);
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "cross-site");
+
+        using var response = await client.GetAsync("/downstream/GraphApi/me", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(0, proxyClient.CallCount);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_AllowsGet_WhenOriginFallbackMatchesCurrentOrigin()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient);
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("Origin", "http://localhost");
+
+        using var response = await client.GetAsync("/downstream/GraphApi/me", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, proxyClient.CallCount);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_AllowsGet_WhenCustomHeaderFallbackMatches()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        await using var app = await CreateApplicationAsync(
+            proxyClient,
+            protectionOptions: new DownstreamProxyGetProtectionOptions
+            {
+                CustomHeaderName = "X-Recrovit-Proxy-Intent",
+                CustomHeaderValue = "same-site"
+            });
+        using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("X-Recrovit-Proxy-Intent", "same-site");
+
+        using var response = await client.GetAsync("/downstream/GraphApi/me", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, proxyClient.CallCount);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_RejectsGet_WhenFallbackSignalsAreMissing()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        await using var app = await CreateApplicationAsync(
+            proxyClient,
+            protectionOptions: new DownstreamProxyGetProtectionOptions
+            {
+                CustomHeaderName = "X-Recrovit-Proxy-Intent",
+                CustomHeaderValue = "same-site"
+            });
+        using var client = app.GetTestClient();
+
+        using var response = await client.GetAsync("/downstream/GraphApi/me", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(0, proxyClient.CallCount);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_LeavesPostUnchanged_WhenFetchMetadataIsCrossSite()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.Accepted)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        await using var app = await CreateApplicationAsync(proxyClient);
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/downstream/GraphApi/me");
+        request.Headers.Add("Sec-Fetch-Site", "cross-site");
+        request.Content = new StringContent("""{"message":"hello"}""");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Equal(1, proxyClient.CallCount);
+        Assert.Equal(HttpMethod.Post, proxyClient.Method);
+    }
+
     [Fact]
     public async Task MapDownstreamApiProxyEndpoints_ReturnsNotFound_ForUnknownApi()
     {
@@ -71,7 +198,8 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
 
     private static async Task<WebApplication> CreateApplicationAsync(
         IDownstreamHttpProxyClient proxyClient,
-        IDownstreamTransportProxyClient? transportProxyClient = null)
+        IDownstreamTransportProxyClient? transportProxyClient = null,
+        DownstreamProxyGetProtectionOptions? protectionOptions = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -101,6 +229,16 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
                 RelativePath = string.Empty
             }
         }));
+        builder.Services.AddSingleton<IOptions<OidcAuthenticationOptions>>(Options.Create(new OidcAuthenticationOptions
+        {
+            DownstreamProxyGetProtection = protectionOptions ?? new DownstreamProxyGetProtectionOptions()
+        }));
+        var proxyAssembly = typeof(IDownstreamHttpProxyClient).Assembly;
+        var evaluatorInterface = proxyAssembly.GetType("Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy.IDownstreamProxyGetRequestProtectionEvaluator")
+            ?? throw new InvalidOperationException("The downstream proxy GET request protection evaluator interface could not be found.");
+        var evaluatorType = proxyAssembly.GetType("Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy.DownstreamProxyGetRequestProtectionEvaluator")
+            ?? throw new InvalidOperationException("The downstream proxy GET request protection evaluator type could not be found.");
+        builder.Services.AddSingleton(evaluatorInterface, evaluatorType);
         builder.Services.Replace(ServiceDescriptor.Singleton<IDownstreamHttpProxyClient>(proxyClient));
         builder.Services.Replace(ServiceDescriptor.Singleton<IDownstreamTransportProxyClient>(transportProxyClient ?? new NoOpDownstreamTransportProxyClient()));
 
