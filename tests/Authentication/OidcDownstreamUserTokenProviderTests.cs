@@ -609,6 +609,37 @@ public sealed class OidcDownstreamUserTokenProviderTests
     }
 
     [Fact]
+    public async Task GetAccessTokenAsync_ThrowsAndDoesNotPersist_WhenRefreshLeaseExpiresBeforeResponseReturns()
+    {
+        var now = DateTimeOffset.Parse("2026-07-31T10:00:00Z");
+        var user = TestUsers.CreateAuthenticatedUser();
+        var timeProvider = new MutableTimeProvider(now);
+        var tokenStore = new InMemoryTokenStore(user, new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = now.AddHours(1)
+        });
+        var provider = CreateProvider(
+            tokenStore,
+            new DelegatingHttpClientFactory(new AdvanceTimeHandler(
+                CreateTokenResponse(accessToken: "fresh-token", refreshToken: "fresh-refresh"),
+                timeProvider,
+                TimeSpan.FromSeconds(5))),
+            refreshLockProvider: new FixedLeaseRefreshLockProvider("lease-owner", now.AddSeconds(1)),
+            timeProvider: timeProvider);
+
+        var ex = await Assert.ThrowsAsync<OidcTokenRefreshFailedException>(() =>
+            provider.GetAccessTokenAsync(user, "SessionValidationApi", TestContext.Current.CancellationToken));
+
+        Assert.Contains("lease expired", ex.Message, StringComparison.OrdinalIgnoreCase);
+
+        var latestState = await tokenStore.GetSessionStateAsync(user, TestContext.Current.CancellationToken);
+        Assert.NotNull(latestState);
+        Assert.Equal("refresh-token", latestState!.State.SessionTokens!.RefreshToken);
+        Assert.Empty(latestState.State.ApiTokens);
+    }
+
+    [Fact]
     public async Task GetAccessTokenAsync_ReusesConcurrentTokenOrReauthenticates_WhenRefreshFailsWithInvalidGrant()
     {
         var user = TestUsers.CreateAuthenticatedUser();

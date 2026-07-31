@@ -53,6 +53,44 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     }
 
     [Fact]
+    public async Task StoreApiTokenAsync_PreservesBothEntries_WhenDifferentApisAreStoredConcurrently()
+    {
+        using var serviceProvider = CreateCoordinatorServiceProvider();
+        var coordinator = serviceProvider.GetRequiredService<ILocalOidcSessionCoordinator>();
+        var distributedCache = new BlockingSetDistributedCache();
+        var dataProtectionProvider = new EphemeralDataProtectionProvider();
+        var firstStore = CreateStore(distributedCache, coordinator: coordinator, dataProtectionProvider: dataProtectionProvider);
+        var secondStore = CreateStore(distributedCache, coordinator: coordinator, dataProtectionProvider: dataProtectionProvider);
+        var user = TestUsers.CreateAuthenticatedUser();
+
+        var sessionValidationWrite = firstStore.StoreApiTokenAsync(user, "SessionValidationApi", ["openid"], new CachedDownstreamApiTokenEntry
+        {
+            AccessToken = "session-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+        }, TestContext.Current.CancellationToken);
+        await distributedCache.FirstSetStarted;
+
+        var graphWrite = secondStore.StoreApiTokenAsync(user, "GraphApi", ["graph.read"], new CachedDownstreamApiTokenEntry
+        {
+            AccessToken = "graph-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+        }, TestContext.Current.CancellationToken);
+
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.False(graphWrite.IsCompleted);
+
+        distributedCache.ReleaseFirstSet();
+        await Task.WhenAll(sessionValidationWrite, graphWrite);
+
+        Assert.Equal(
+            "session-token",
+            (await firstStore.GetApiTokenAsync(user, "SessionValidationApi", ["openid"], TestContext.Current.CancellationToken))!.AccessToken);
+        Assert.Equal(
+            "graph-token",
+            (await firstStore.GetApiTokenAsync(user, "GraphApi", ["graph.read"], TestContext.Current.CancellationToken))!.AccessToken);
+    }
+
+    [Fact]
     public async Task StoreSessionTokenSetAsync_RoundTripsEntriesBySession()
     {
         var distributedCache = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));

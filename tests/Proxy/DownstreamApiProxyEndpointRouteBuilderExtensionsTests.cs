@@ -336,6 +336,7 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
 
         Assert.Equal(HttpStatusCode.TemporaryRedirect, response.StatusCode);
         Assert.Null(response.Headers.Location);
+        Assert.Equal(1, proxyClient.CallCount);
     }
 
     [Theory]
