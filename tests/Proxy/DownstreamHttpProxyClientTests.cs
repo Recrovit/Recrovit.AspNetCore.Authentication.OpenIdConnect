@@ -245,15 +245,8 @@ public sealed class DownstreamHttpProxyClientTests
     }
 
     [Theory]
-    [InlineData("/../../admin")]
-    [InlineData("/./health")]
-    [InlineData("/%2e%2e/admin")]
-    [InlineData("/%2e./admin")]
-    [InlineData("/.%2e/admin")]
-    [InlineData("/%252e%252e/admin")]
-    [InlineData("/..%2fadmin")]
-    [InlineData("/..%5cadmin")]
-    public async Task SendAsync_RejectsTraversalPayloads(string pathAndQuery)
+    [MemberData(nameof(GetInvalidProxyPaths))]
+    public async Task SendAsync_RejectsInvalidProxyPaths(string pathAndQuery)
     {
         var captureHandler = new CaptureRequestHandler();
         using var httpClient = new HttpClient(captureHandler);
@@ -263,6 +256,26 @@ public sealed class DownstreamHttpProxyClientTests
             "SessionValidationApi",
             HttpMethod.Get,
             pathAndQuery,
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+
+        Assert.Contains("path", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(captureHandler.LastRequest);
+    }
+
+    [Fact]
+    public async Task SendAsync_RejectsProxyPathThatRequiresExcessiveDecoding()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(httpClient, new StubDownstreamUserTokenProvider());
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            $"/{EncodeRepeatedly("..", 7)}/admin",
             TestUsers.CreateAuthenticatedUser(),
             content: null,
             headers: [],
@@ -318,5 +331,33 @@ public sealed class DownstreamHttpProxyClientTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("https://api.example.com/gateway/session/check?id=5", captureHandler.LastRequest!.RequestUri!.ToString());
+    }
+
+    public static IEnumerable<object[]> GetInvalidProxyPaths()
+    {
+        yield return ["/../../admin"];
+        yield return ["/./health"];
+        yield return ["/%2e%2e/admin"];
+        yield return ["/%2e./admin"];
+        yield return ["/.%2e/admin"];
+        yield return [$"/{EncodeRepeatedly("..", 3)}/admin"];
+        yield return [$"/{EncodeRepeatedly("..", 4)}/admin"];
+        yield return [$"/..{EncodeRepeatedly("/", 2)}admin"];
+        yield return [$"/..{EncodeRepeatedly("\\", 2)}admin"];
+        yield return [$"/{EncodeRepeatedly("../..\\admin", 1)}"];
+        yield return ["/%ZZ/admin"];
+        yield return [$"/{EncodeRepeatedly("https://attacker.example/collect", 1)}"];
+        yield return [$"/{EncodeRepeatedly("//attacker.example/collect", 2)}"];
+    }
+
+    private static string EncodeRepeatedly(string value, int times)
+    {
+        var encodedValue = value;
+        for (var i = 0; i < times; i++)
+        {
+            encodedValue = Uri.EscapeDataString(encodedValue).ToLowerInvariant();
+        }
+
+        return encodedValue;
     }
 }

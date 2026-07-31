@@ -10,6 +10,8 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 
 internal static class DownstreamProxyUtilities
 {
+    private const int MaxDecodePasses = 6;
+
     public static string BuildPathAndQuery(string? prefix, string pathAndQuery)
     {
         var normalizedPathAndQuery = pathAndQuery.TrimStart('/');
@@ -178,8 +180,33 @@ internal static class DownstreamProxyUtilities
     private static void ValidateIncomingPath(string pathAndQuery)
     {
         var path = GetPathPart(pathAndQuery).ToString();
-        ValidateAuthorityLikePrefix(path);
         ValidateDecodedPathStages(path);
+    }
+
+    private static void ValidatePathStage(string path)
+    {
+        ValidatePercentEncoding(path);
+        ValidateAuthorityLikePrefix(path);
+        ValidateAbsoluteUri(path);
+        ValidateDotSegments(path);
+    }
+
+    private static void ValidatePercentEncoding(string path)
+    {
+        for (var index = 0; index < path.Length; index++)
+        {
+            if (path[index] != '%')
+            {
+                continue;
+            }
+
+            if (index + 2 >= path.Length || !Uri.IsHexDigit(path[index + 1]) || !Uri.IsHexDigit(path[index + 2]))
+            {
+                throw new InvalidDownstreamProxyPathException("The downstream proxy path is malformed.");
+            }
+
+            index += 2;
+        }
     }
 
     private static void ValidateAuthorityLikePrefix(string path)
@@ -199,20 +226,23 @@ internal static class DownstreamProxyUtilities
     private static void ValidateDecodedPathStages(string rawPath)
     {
         var decodedPath = rawPath;
+        ValidatePathStage(decodedPath);
 
-        for (var decodePass = 0; decodePass < 3; decodePass++)
+        for (var decodePass = 0; decodePass < MaxDecodePasses; decodePass++)
         {
-            ValidateAbsoluteUri(decodedPath);
-            ValidateDotSegments(decodedPath);
-
             var nextPath = Uri.UnescapeDataString(decodedPath);
             if (string.Equals(nextPath, decodedPath, StringComparison.Ordinal))
             {
-                break;
+                return;
             }
 
-            ValidateAuthorityLikePrefix(nextPath);
+            ValidatePathStage(nextPath);
             decodedPath = nextPath;
+        }
+
+        if (!string.Equals(Uri.UnescapeDataString(decodedPath), decodedPath, StringComparison.Ordinal))
+        {
+            throw new InvalidDownstreamProxyPathException("The downstream proxy path must not require excessive decoding.");
         }
     }
 

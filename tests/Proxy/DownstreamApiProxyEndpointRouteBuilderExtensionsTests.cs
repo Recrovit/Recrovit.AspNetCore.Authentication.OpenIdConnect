@@ -340,42 +340,59 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
     }
 
     [Theory]
-    [InlineData("/downstream/GraphApi/%252e%252e/admin")]
-    [InlineData("/downstream/GraphApi/..%2fadmin")]
-    [InlineData("/downstream/GraphApi/..%5cadmin")]
-    public async Task MapDownstreamApiProxyEndpoints_ReturnsBadRequest_ForTraversalPayloads(string requestPath)
+    [MemberData(nameof(GetInvalidProxyHttpRequestPaths))]
+    public async Task MapDownstreamApiProxyEndpoints_ReturnsBadRequest_ForInvalidProxyPaths(string requestPath)
     {
         var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(string.Empty)
         });
+        var transportProxyClient = new RecordingDownstreamTransportProxyClient();
 
-        await using var app = await CreateApplicationAsync(proxyClient);
-        using var client = app.GetTestClient();
-        client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+        await using var app = await CreateApplicationAsync(proxyClient, transportProxyClient);
 
-        using var response = await client.GetAsync(requestPath, TestContext.Current.CancellationToken);
+        var responseStatusCode = await SendGetRequestAsync(app, requestPath, "Sec-Fetch-Site", "same-origin");
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(StatusCodes.Status400BadRequest, responseStatusCode);
         Assert.Equal(0, proxyClient.CallCount);
+        Assert.Equal(0, transportProxyClient.CallCount);
+    }
+
+    [Theory]
+    [MemberData(nameof(GetInvalidProxyWebSocketRequestPaths))]
+    public async Task MapDownstreamApiProxyEndpoints_ReturnsBadRequest_ForInvalidProxyPathsOnWebSocketRequests(string requestPath)
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var transportProxyClient = new RecordingDownstreamTransportProxyClient();
+
+        await using var app = await CreateApplicationAsync(proxyClient, transportProxyClient);
+
+        var responseStatusCode = await SendGetRequestAsync(app, requestPath, "Origin", "http://localhost");
+
+        Assert.Equal(StatusCodes.Status400BadRequest, responseStatusCode);
+        Assert.Equal(0, proxyClient.CallCount);
+        Assert.Equal(0, transportProxyClient.CallCount);
     }
 
     [Fact]
-    public async Task MapDownstreamApiProxyEndpoints_ReturnsBadRequest_ForTraversalPayloadsOnWebSocketRequests()
+    public async Task MapDownstreamApiProxyEndpoints_ReturnsBadRequest_WhenProxyPathRequiresExcessiveDecoding()
     {
         var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(string.Empty)
         });
+        var transportProxyClient = new RecordingDownstreamTransportProxyClient();
 
-        await using var app = await CreateApplicationAsync(proxyClient);
-        using var client = app.GetTestClient();
-        client.DefaultRequestHeaders.Add("Origin", "http://localhost");
+        await using var app = await CreateApplicationAsync(proxyClient, transportProxyClient);
 
-        using var response = await client.GetAsync("/downstream/GraphApi/%252e%252e/socket?ws=true", TestContext.Current.CancellationToken);
+        var responseStatusCode = await SendGetRequestAsync(app, BuildProxyRequestPath($"{EncodeRepeatedly("..", 7)}/admin"), "Sec-Fetch-Site", "same-origin");
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(StatusCodes.Status400BadRequest, responseStatusCode);
         Assert.Equal(0, proxyClient.CallCount);
+        Assert.Equal(0, transportProxyClient.CallCount);
     }
 
     [Fact]
@@ -917,6 +934,26 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         Assert.Contains("Authorization", ex.Message, StringComparison.Ordinal);
     }
 
+    public static IEnumerable<object[]> GetInvalidProxyHttpRequestPaths()
+    {
+        yield return [BuildProxyRequestPath($"{EncodeRepeatedly("..", 3)}/admin")];
+        yield return [BuildProxyRequestPath($"{EncodeRepeatedly("..", 4)}/admin")];
+        yield return [BuildProxyRequestPath($"..{EncodeRepeatedly("/", 2)}admin")];
+        yield return [BuildProxyRequestPath($"..{EncodeRepeatedly("\\", 2)}admin")];
+        yield return [BuildProxyRequestPath(EncodeRepeatedly("../..\\admin", 1))];
+        yield return [BuildProxyRequestPath("%ZZ/admin")];
+        yield return [BuildProxyRequestPath(EncodeRepeatedly("https://attacker.example/collect", 1))];
+        yield return [BuildProxyRequestPath(EncodeRepeatedly("//attacker.example/collect", 2))];
+    }
+
+    public static IEnumerable<object[]> GetInvalidProxyWebSocketRequestPaths()
+    {
+        foreach (var testCase in GetInvalidProxyHttpRequestPaths())
+        {
+            yield return [BuildWebSocketProxyRequestPath((string)testCase[0])];
+        }
+    }
+
     private static async Task<WebApplication> CreateApplicationAsync(
         IDownstreamHttpProxyClient proxyClient,
         IDownstreamTransportProxyClient? transportProxyClient = null,
@@ -1008,6 +1045,40 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
 
         await app.StartAsync(TestContext.Current.CancellationToken);
         return app;
+    }
+
+    private static string BuildProxyRequestPath(string path)
+        => $"/downstream/GraphApi/{path.TrimStart('/')}";
+
+    private static string BuildWebSocketProxyRequestPath(string httpRequestPath)
+        => $"{httpRequestPath}?ws=true";
+
+    private static async Task<int> SendGetRequestAsync(WebApplication app, string requestPath, string headerName, string headerValue)
+    {
+        var queryIndex = requestPath.IndexOf('?');
+        var path = queryIndex >= 0 ? requestPath[..queryIndex] : requestPath;
+        var query = queryIndex >= 0 ? requestPath[queryIndex..] : string.Empty;
+
+        var context = await app.GetTestServer().SendAsync(request =>
+        {
+            request.Request.Method = HttpMethods.Get;
+            request.Request.Path = path;
+            request.Request.QueryString = new QueryString(query);
+            request.Request.Headers[headerName] = headerValue;
+        });
+
+        return context.Response.StatusCode;
+    }
+
+    private static string EncodeRepeatedly(string value, int times)
+    {
+        var encodedValue = value;
+        for (var i = 0; i < times; i++)
+        {
+            encodedValue = Uri.EscapeDataString(encodedValue).ToLowerInvariant();
+        }
+
+        return encodedValue;
     }
 
     private sealed class NoOpDownstreamTransportProxyClient : IDownstreamTransportProxyClient
