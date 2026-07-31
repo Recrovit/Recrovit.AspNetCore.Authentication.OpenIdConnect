@@ -308,6 +308,17 @@ Key responsibilities:
 - refresh skew, which controls how early token refresh starts before access token expiration
 - refresh lock lease duration for session-scoped refresh coordination
 
+`CacheKeyHmacSecret` is a compatibility default for local development only. Production deployments should always override it with a deployment-specific secret.
+
+Use these rules for `CacheKeyHmacSecret`:
+
+- generate it from at least 32 random bytes
+- keep one unique value per deployment
+- use the same value on every node of the same multi-instance deployment
+- prefer a unique value even for single-instance deployments
+- do not commit it to source control
+- load it from a secret store or from configuration backed by an environment variable such as `Recrovit__OpenIdConnect__TokenCache__CacheKeyHmacSecret`
+
 ### `Recrovit:OpenIdConnect:Infrastructure`
 
 Bound to `HostSecurityOptions`.
@@ -383,6 +394,7 @@ In development or simple single-instance local runs, you can usually omit it. In
       },
       "TokenCache": {
         "CacheKeyPrefix": "oidc-user-token-cache",
+        "CacheKeyHmacSecret": "<load-from-secret-store-or-environment>",
         "RefreshBeforeExpirationSeconds": 60
       },
       "Infrastructure": {
@@ -851,7 +863,12 @@ In production:
 - `AddDistributedMemoryCache` is not sufficient for multi-instance production use
 - an explicit shared Data Protection key repository is required
 - `HostSecurityOptions.DataProtectionKeysPath` remains supported as a backward-compatible way to configure that repository
-- `TokenCacheOptions.CacheKeyHmacSecret` must be shared across all instances
+- `TokenCacheOptions.CacheKeyHmacSecret` must be deployment-specific and must not use the built-in development default
+- `TokenCacheOptions.CacheKeyHmacSecret` should be generated from at least 32 random bytes
+- `TokenCacheOptions.CacheKeyHmacSecret` should be loaded from a secret store or environment-backed configuration, not from source-controlled configuration
+- `TokenCacheOptions.CacheKeyHmacSecret` must be shared across all nodes of the same multi-instance deployment
+- a unique `TokenCacheOptions.CacheKeyHmacSecret` is still recommended for single-instance deployments
+- if production still uses the built-in development default, startup logs a warning without logging the secret value
 - `TokenCacheOptions.DeploymentMode` defaults to `SingleInstance`
 - when `TokenCacheOptions.DeploymentMode` is set to `MultiInstance`, the host must replace both `IOidcSessionRefreshLockProvider` and `IOidcSessionStateStore`
 - the replacement refresh lock provider must coordinate one authenticated session across nodes for the whole lease duration

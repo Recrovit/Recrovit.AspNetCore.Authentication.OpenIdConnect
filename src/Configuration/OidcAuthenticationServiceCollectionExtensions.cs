@@ -605,6 +605,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
             ValidateDataProtectionConfiguration(services, environment, logger, hostSecurityOptions);
             ValidateTokenRefreshCoordinationConfiguration(services, logger);
+            ValidateTokenCacheSecretConfiguration(services, environment, logger);
 
             if (!environment.IsProduction())
             {
@@ -653,6 +654,23 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 throw new InvalidOperationException(
                     "Production requires a shared distributed cache for user token storage. Replace AddDistributedMemoryCache with a shared implementation.");
             }
+        }
+    }
+
+    private static void ValidateTokenCacheSecretConfiguration(IServiceProvider services, IWebHostEnvironment environment, ILogger logger)
+    {
+        if (!environment.IsProduction())
+        {
+            return;
+        }
+
+        var tokenCacheOptions = services.GetRequiredService<IOptions<TokenCacheOptions>>().Value;
+        if (string.Equals(
+            tokenCacheOptions.CacheKeyHmacSecret,
+            TokenCacheOptions.DevelopmentOnlySharedHmacSecret,
+            StringComparison.Ordinal))
+        {
+            OidcInfrastructureLog.DefaultTokenCacheHmacSecretWarning(logger);
         }
     }
 

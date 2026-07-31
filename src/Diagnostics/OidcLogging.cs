@@ -13,6 +13,7 @@ internal static class OidcLogEvents
     public static readonly EventId SessionTokenPersisted = new(1006, nameof(SessionTokenPersisted));
     public static readonly EventId TicketTokensCleared = new(1007, nameof(TicketTokensCleared));
     public static readonly EventId DataProtectionConfigurationWarning = new(1008, nameof(DataProtectionConfigurationWarning));
+    public static readonly EventId DefaultTokenCacheHmacSecretWarning = new(1009, nameof(DefaultTokenCacheHmacSecretWarning));
 
     public static readonly EventId LoginRequested = new(2000, nameof(LoginRequested));
     public static readonly EventId LogoutRequested = new(2001, nameof(LogoutRequested));
@@ -142,6 +143,9 @@ internal static partial class OidcInfrastructureLog
 
     [LoggerMessage(EventId = 1008, Level = LogLevel.Warning, Message = "{Message}")]
     public static partial void DataProtectionConfigurationWarning(ILogger logger, string message);
+
+    [LoggerMessage(EventId = 1009, Level = LogLevel.Warning, Message = "Production is using the built-in development-only TokenCache:CacheKeyHmacSecret default. Configure a deployment-specific secret from a secure external source.")]
+    public static partial void DefaultTokenCacheHmacSecretWarning(ILogger logger);
 }
 
 internal static partial class OidcEndpointLog

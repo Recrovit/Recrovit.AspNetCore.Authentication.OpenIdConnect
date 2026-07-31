@@ -12,6 +12,8 @@ public sealed class TokenCacheOptions
     /// </summary>
     public const string SectionName = "TokenCache";
 
+    internal const string DevelopmentOnlySharedHmacSecret = "development-only-shared-hmac-secret";
+
     /// <summary>
     /// Gets the prefix used for distributed cache keys that hold encrypted token payloads.
     /// </summary>
@@ -23,7 +25,7 @@ public sealed class TokenCacheOptions
     /// </summary>
     [Required]
     [MinLength(16)]
-    public string CacheKeyHmacSecret { get; init; } = "development-only-shared-hmac-secret";
+    public string CacheKeyHmacSecret { get; init; } = DevelopmentOnlySharedHmacSecret;
 
     /// <summary>
     /// Gets whether the token cache is expected to run on one node or across multiple application instances.

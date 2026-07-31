@@ -62,6 +62,10 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 
 ### Other Changes
 
+- Token cache HMAC secret guidance and diagnostics
+  - Added a production startup warning when `TokenCacheOptions.CacheKeyHmacSecret` still uses the built-in development default.
+  - Clarified the README guidance for deployment-specific HMAC secrets, secure loading, and multi-instance secret sharing.
+
 - Data Protection diagnostics, tests, and docs
   - Added startup validation and warning coverage for explicit Data Protection repository, application isolation, and key-ring encryption scenarios.
   - Expanded test coverage for callback-based configuration, host-preconfigured Data Protection, and `Standard` versus `Hardened` profile behavior.

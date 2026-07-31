@@ -1334,6 +1334,96 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_LogsWarning_WhenProductionUsesDevelopmentDefaultTokenCacheHmacSecret()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:CacheKeyHmacSecret"] = "development-only-shared-hmac-secret"
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection
+                .PersistKeysToFileSystem(new DirectoryInfo("/token-cache-warning-keys"))
+                .ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        const string expectedWarningFragment = "development-only TokenCache:CacheKeyHmacSecret default";
+        var warning = Assert.Single(loggerFactory.Entries, entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains(expectedWarningFragment, StringComparison.Ordinal));
+        Assert.Contains(expectedWarningFragment, warning.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("development-only-shared-hmac-secret", warning.Message, StringComparison.Ordinal);
+        Assert.Equal(1, loggerFactory.Entries.Count(entry => entry.Level == LogLevel.Warning));
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_DoesNotLogWarning_WhenProductionUsesCustomTokenCacheHmacSecret()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:CacheKeyHmacSecret"] = "production-hmac-secret-0123456789"
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection
+                .PersistKeysToFileSystem(new DirectoryInfo("/token-cache-custom-keys"))
+                .ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        const string expectedWarningFragment = "development-only TokenCache:CacheKeyHmacSecret default";
+        Assert.DoesNotContain(
+            loggerFactory.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains(expectedWarningFragment, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_DoesNotLogWarning_WhenDevelopmentUsesDevelopmentDefaultTokenCacheHmacSecret()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:CacheKeyHmacSecret"] = "development-only-shared-hmac-secret"
+        });
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development });
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        const string expectedWarningFragment = "development-only TokenCache:CacheKeyHmacSecret default";
+        Assert.DoesNotContain(
+            loggerFactory.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains(expectedWarningFragment, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenHardenedProductionMissingApplicationIsolation()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
