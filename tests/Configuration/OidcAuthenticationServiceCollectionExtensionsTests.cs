@@ -177,7 +177,7 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
-    public void AddOidcAuthenticationInfrastructure_UsesDefaultDownstreamProxyGetProtection()
+    public void AddOidcAuthenticationInfrastructure_UsesDefaultDownstreamProxyRequestProtection()
     {
         var configuration = TestConfiguration.Build();
 
@@ -187,10 +187,11 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         using var serviceProvider = services.BuildServiceProvider();
         var options = serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value;
 
-        Assert.True(options.DownstreamProxyGetProtection.Enabled);
-        Assert.Equal(ProxyGetRequestProtectionMode.FetchMetadataFirst, options.DownstreamProxyGetProtection.Mode);
-        Assert.True(options.DownstreamProxyGetProtection.AllowOriginFallback);
-        Assert.Empty(options.DownstreamProxyGetProtection.AllowedOrigins);
+        Assert.Equal(ProxyRequestProtectionMode.FetchMetadataFirst, options.DownstreamProxyRequestProtection.Mode);
+        Assert.False(options.DownstreamProxyRequestProtection.AllowSameSite);
+        Assert.Empty(options.DownstreamProxyRequestProtection.AllowedHttpOrigins);
+        Assert.Empty(options.DownstreamProxyRequestProtection.AllowedWebSocketOrigins);
+        Assert.False(options.DownstreamProxyRequestProtection.AllowMissingWebSocketOrigin);
     }
 
     [Fact]
@@ -274,11 +275,11 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
-    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyGetProtectionCustomHeaderPair()
+    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyRequestProtectionCustomHeaderPair()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
         {
-            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyGetProtection:CustomHeaderName"] = "X-Recrovit-Proxy-Intent"
+            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyRequestProtection:CustomHeaderName"] = "X-Recrovit-Proxy-Intent"
         });
 
         var services = new ServiceCollection();
@@ -288,15 +289,15 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         var ex = Assert.Throws<OptionsValidationException>(() =>
             serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
 
-        Assert.Contains("DownstreamProxyGetProtection", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("DownstreamProxyRequestProtection", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyGetProtectionAllowedOrigins()
+    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyRequestProtectionAllowedHttpOrigins()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
         {
-            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyGetProtection:AllowedOrigins:0"] = "javascript:alert(1)"
+            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyRequestProtection:AllowedHttpOrigins:0"] = "javascript:alert(1)"
         });
 
         var services = new ServiceCollection();
@@ -306,7 +307,25 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         var ex = Assert.Throws<OptionsValidationException>(() =>
             serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
 
-        Assert.Contains("AllowedOrigins", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("AllowedHttpOrigins", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyRequestProtectionAllowedWebSocketOrigins()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyRequestProtection:AllowedWebSocketOrigins:0"] = "https://user:pass@app.example.com"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
+
+        Assert.Contains("AllowedWebSocketOrigins", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

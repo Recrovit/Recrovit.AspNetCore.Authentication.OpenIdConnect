@@ -21,7 +21,6 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Diagnostics;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 using System.Security.Claims;
 using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 
@@ -136,12 +135,15 @@ public static class OidcAuthenticationServiceCollectionExtensions
                     || downstreamApiCatalog.Apis.ContainsKey(options.SessionValidationDownstreamApiName),
                 $"{hostSection.Path}:SessionValidationDownstreamApiName must reference a configured entry in {downstreamApisSection.Path}.")
             .Validate(
-                options => string.IsNullOrWhiteSpace(options.DownstreamProxyGetProtection.CustomHeaderName)
-                    == string.IsNullOrWhiteSpace(options.DownstreamProxyGetProtection.CustomHeaderValue),
-                $"{hostSection.Path}:DownstreamProxyGetProtection requires both CustomHeaderName and CustomHeaderValue when either is configured.")
+                options => string.IsNullOrWhiteSpace(options.DownstreamProxyRequestProtection.CustomHeaderName)
+                    == string.IsNullOrWhiteSpace(options.DownstreamProxyRequestProtection.CustomHeaderValue),
+                $"{hostSection.Path}:DownstreamProxyRequestProtection requires both CustomHeaderName and CustomHeaderValue when either is configured.")
             .Validate(
-                options => options.DownstreamProxyGetProtection.AllowedOrigins.All(IsValidOrigin),
-                $"{hostSection.Path}:DownstreamProxyGetProtection:AllowedOrigins must contain only absolute HTTP or HTTPS origins.")
+                options => options.DownstreamProxyRequestProtection.AllowedHttpOrigins.All(IsValidOrigin),
+                $"{hostSection.Path}:DownstreamProxyRequestProtection:AllowedHttpOrigins must contain only absolute HTTP or HTTPS origins.")
+            .Validate(
+                options => options.DownstreamProxyRequestProtection.AllowedWebSocketOrigins.All(IsValidOrigin),
+                $"{hostSection.Path}:DownstreamProxyRequestProtection:AllowedWebSocketOrigins must contain only absolute HTTP or HTTPS origins.")
             .ValidateOnStart();
 
         services.AddOptions<HostSecurityOptions>()
@@ -166,9 +168,10 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddDistributedMemoryCache();
         services.AddHttpContextAccessor();
         services.AddHttpClient();
+        services.AddAntiforgery();
         services.AddHttpClient<IDownstreamHttpProxyClient, DownstreamHttpProxyClient>();
         services.AddSingleton<ProxyEndpointMatcher>();
-        services.AddSingleton<IDownstreamProxyGetRequestProtectionEvaluator, DownstreamProxyGetRequestProtectionEvaluator>();
+        services.AddSingleton<IDownstreamProxyRequestProtectionEvaluator, DownstreamProxyRequestProtectionEvaluator>();
         services.AddScoped<IDownstreamTransportProxyClient, DownstreamTransportProxyClient>();
 
         services.AddScoped<DistributedDownstreamUserTokenStore>();
@@ -424,20 +427,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
     }
 
     private static bool IsValidOrigin(string? origin)
-    {
-        if (string.IsNullOrWhiteSpace(origin) || !Uri.TryCreate(origin, UriKind.Absolute, out var uri))
-        {
-            return false;
-        }
-
-        if (!uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-            && !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return string.IsNullOrEmpty(uri.PathAndQuery) || uri.PathAndQuery == "/";
-    }
+        => DownstreamProxyOriginHelper.IsValidConfiguredOrigin(origin);
 
     private static void ConfigureDataProtection(
         IServiceCollection services,

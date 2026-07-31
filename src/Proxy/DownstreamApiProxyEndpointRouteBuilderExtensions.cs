@@ -1,7 +1,10 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Logging;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Diagnostics;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 
@@ -20,6 +23,7 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
                 $"{normalizedRoutePrefix}/{{apiName}}",
                 ProxyEndpointConventionBuilderExtensions.DownstreamProxyMethods,
                 ProxyDownstreamApiAsync)
+            .WithMetadata(new RequireAntiforgeryTokenAttribute())
             .AsProxyEndpoint()
             .RequireAuthorization()
             .DisableAuthRedirects()
@@ -29,6 +33,7 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
                 $"{normalizedRoutePrefix}/{{apiName}}/{{**path}}",
                 ProxyEndpointConventionBuilderExtensions.DownstreamProxyMethods,
                 ProxyDownstreamApiAsync)
+            .WithMetadata(new RequireAntiforgeryTokenAttribute())
             .AsProxyEndpoint()
             .RequireAuthorization()
             .DisableAuthRedirects()
@@ -42,9 +47,11 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
         string apiName,
         string? path,
         DownstreamApiCatalog downstreamApiCatalog,
-        IDownstreamProxyGetRequestProtectionEvaluator getRequestProtectionEvaluator,
+        IDownstreamProxyRequestProtectionEvaluator requestProtectionEvaluator,
+        IAntiforgery antiforgery,
         IDownstreamHttpProxyClient httpProxyClient,
         IDownstreamTransportProxyClient transportProxyClient,
+        ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
         if (!downstreamApiCatalog.Apis.ContainsKey(apiName))
@@ -52,9 +59,16 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
             return Results.NotFound();
         }
 
-        if (!getRequestProtectionEvaluator.IsRequestAllowed(context, out _))
+        var protectionEvaluation = requestProtectionEvaluator.Evaluate(context);
+        if (!protectionEvaluation.IsAllowed)
         {
-            return Results.StatusCode(StatusCodes.Status403Forbidden);
+            return Results.StatusCode(protectionEvaluation.FailureStatusCode);
+        }
+
+        if (protectionEvaluation.RequiresAntiforgeryValidation
+            && !await IsAntiforgeryRequestValidAsync(context, antiforgery, loggerFactory))
+        {
+            return Results.BadRequest();
         }
 
         var pathAndQuery = BuildPathAndQuery(path, context.Request.QueryString);
@@ -107,5 +121,38 @@ public static class DownstreamApiProxyEndpointRouteBuilderExtensions
             : "/" + path.TrimStart('/');
 
         return $"{normalizedPath}{queryString}";
+    }
+
+    private static async Task<bool> IsAntiforgeryRequestValidAsync(
+        HttpContext context,
+        IAntiforgery antiforgery,
+        ILoggerFactory loggerFactory)
+    {
+        var logger = loggerFactory.CreateLogger(typeof(DownstreamApiProxyEndpointRouteBuilderExtensions).FullName!);
+
+        var antiforgeryValidationFeature = context.Features.Get<IAntiforgeryValidationFeature>();
+        if (antiforgeryValidationFeature is { IsValid: false })
+        {
+            OidcProxyLog.DownstreamProxyRequestRejected(
+                logger,
+                context.Request.Path.Value ?? "/",
+                context.Request.Method,
+                "http",
+                "antiforgery:feature");
+            return false;
+        }
+
+        if (!await antiforgery.IsRequestValidAsync(context))
+        {
+            OidcProxyLog.DownstreamProxyRequestRejected(
+                logger,
+                context.Request.Path.Value ?? "/",
+                context.Request.Method,
+                "http",
+                "antiforgery:service");
+            return false;
+        }
+
+        return true;
     }
 }

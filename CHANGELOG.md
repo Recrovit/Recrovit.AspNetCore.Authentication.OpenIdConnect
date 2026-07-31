@@ -30,9 +30,12 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Blocked downstream `Set-Cookie` forwarding by default to prevent host-origin cookie injection from proxied responses.
   - Removed hop-by-hop response headers, including headers declared dynamically through `Connection`, before writing proxied downstream responses back to callers.
 - Downstream proxy browser-origin protection
-  - Added secure-by-default browser-origin protection for cookie-authenticated downstream proxy HTTP `GET` requests.
-  - Uses `Sec-Fetch-Site` as the primary signal and can fall back to a same-origin `Origin` header or a configured custom request header when Fetch Metadata is unavailable.
-  - Rejects blocked proxy `GET` requests with `403 Forbidden` before any outbound downstream request is created.
+  - Expanded the secure-by-default downstream proxy protection policy from `GET`-only to the full generic proxy surface, including WebSocket handshakes.
+  - Renamed `Recrovit:OpenIdConnect:Host:DownstreamProxyGetProtection` to `DownstreamProxyRequestProtection` and replaced the old GET-specific options types with request-wide equivalents.
+  - Changed the default HTTP policy to accept only `Sec-Fetch-Site: same-origin`, with `same-site` available only through explicit opt-in and `none` rejected in strict mode.
+  - Required valid antiforgery tokens for cookie-authenticated unsafe proxy methods after origin policy acceptance, returning `400 Bad Request` on antiforgery failure before any outbound dispatch.
+  - Added strict WebSocket `Origin` validation with exact scheme, host, and effective-port matching, explicit allowlists, `null` rejection, and opt-in support for missing `Origin` on non-browser clients.
+  - Rejects blocked proxy requests with `403 Forbidden` before any outbound downstream request is created.
 - Session token refresh concurrency and cache hardening
   - Added public `ILocalOidcSessionCoordinator` and `ILocalOidcSessionLockLease` contracts with a singleton process-local implementation shared by scoped token stores.
   - Serialized sign-in persistence, API-token writes, refresh rotation, logout, cleanup, and corrupted-cache deletion through one session-scoped local lock.
@@ -60,10 +63,17 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 - Proxy regression coverage
   - Added proxy tests for valid relative path handling, origin preservation, empty-path behavior, and rejection of unsafe proxy path forms.
   - Expanded regression coverage for encoded separators, backslash variants, port-switch attempts, transport/WebSocket path validation, and downstream `Set-Cookie` injection filtering.
-  - Added regression coverage for allowed same-site proxy `GET` requests, blocked cross-site browser `GET` requests, and custom-header fallback behavior.
+  - Added regression coverage for strict fetch-metadata evaluation, origin fallback validation, unsafe-method antiforgery enforcement, WebSocket origin allowlists, and explicit missing-origin WebSocket opt-ins.
 - Token state architecture and documentation
   - Added `IOidcSessionStateStore`, versioned session-state types, HMAC cache-key derivation, and configuration coverage for the new token-state model.
   - Updated token lifecycle and production configuration documentation to describe the session-aggregate store, shared HMAC secret requirement, deployment-mode semantics, and multi-instance refresh coordination expectations.
+
+### Breaking Changes
+
+- Downstream proxy request protection configuration
+  - Renamed `Recrovit:OpenIdConnect:Host:DownstreamProxyGetProtection` to `DownstreamProxyRequestProtection`.
+  - Replaced the GET-specific options and enum types with request-wide equivalents: `DownstreamProxyRequestProtectionOptions` and `ProxyRequestProtectionMode`.
+  - Tightened the default generic proxy policy so hosts that relied on the previous GET-only protection behavior must update frontend request handling and configuration for unsafe HTTP methods and WebSocket handshakes.
 
 
 ## [10.1.0] - 2026-07-10

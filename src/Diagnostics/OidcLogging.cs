@@ -61,7 +61,7 @@ internal static class OidcLogEvents
     public static readonly EventId AuthorizationRedirectSuppressed = new(6000, nameof(AuthorizationRedirectSuppressed));
     public static readonly EventId AuthorizationStatusCodeWritten = new(6001, nameof(AuthorizationStatusCodeWritten));
 
-    public static readonly EventId DownstreamProxyGetRequestRejected = new(7000, nameof(DownstreamProxyGetRequestRejected));
+    public static readonly EventId DownstreamProxyRequestRejected = new(7000, nameof(DownstreamProxyRequestRejected));
 }
 
 internal static class OidcLogScopes
@@ -287,6 +287,6 @@ internal static partial class OidcAuthorizationLog
 
 internal static partial class OidcProxyLog
 {
-    [LoggerMessage(EventId = 7000, Level = LogLevel.Warning, Message = "Rejected downstream proxy HTTP GET request before outbound dispatch. Path={Path}, Reason={Reason}")]
-    public static partial void DownstreamProxyGetRequestRejected(ILogger logger, string path, string reason);
+    [LoggerMessage(EventId = 7000, Level = LogLevel.Warning, Message = "Rejected downstream proxy request before outbound dispatch. Path={Path}, Method={Method}, RequestType={RequestType}, Reason={Reason}")]
+    public static partial void DownstreamProxyRequestRejected(ILogger logger, string path, string method, string requestType, string reason);
 }

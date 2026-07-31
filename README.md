@@ -185,7 +185,7 @@ Behavior:
 - the route path after `/downstream/{apiName}` is appended only within that configured downstream root; attempts to escape it are rejected with `400 Bad Request`
 - the host acquires or refreshes the signed-in user's downstream access token through `IDownstreamUserTokenProvider`
 - the request is forwarded through the built-in downstream HTTP proxy infrastructure
-- cookie-authenticated downstream proxy `GET` requests are protected against cross-site browser initiation by default
+- cookie-authenticated downstream proxy requests are protected against cross-site browser initiation by default, and unsafe methods also require antiforgery validation
 - API-style authorization behavior is preserved, so unauthorized proxy requests return `401` or `403` instead of redirecting to login
 
 This capability is intentionally generic. It is useful for BFF-style hosts, server-proxy architectures, and any application that wants to expose downstream APIs through a cookie-authenticated OIDC host without re-implementing proxy routing.
@@ -218,21 +218,25 @@ For example, if `BaseUrl` is `https://api.example.com/gateway` and `RelativePath
 
 ### Downstream Proxy GET Browser Protection
 
-The host options include `Recrovit:OpenIdConnect:Host:DownstreamProxyGetProtection` for the generic downstream HTTP proxy.
+The host options include `Recrovit:OpenIdConnect:Host:DownstreamProxyRequestProtection` for the generic downstream proxy surface.
 
 Default behavior:
 
-- protection is enabled by default
-- only HTTP `GET` proxy requests are checked
-- WebSocket proxy handshakes are not changed by this policy
+- HTTP requests allow only `Sec-Fetch-Site: same-origin` by default
+- HTTP `POST`, `PUT`, `PATCH`, `DELETE`, and any other unsafe proxy methods also require a valid antiforgery token
+- WebSocket proxy handshakes require a single non-`null` `Origin` header that matches the host origin
 - `Sec-Fetch-Site` is the primary signal
-- when Fetch Metadata headers are unavailable, the host can fall back to a same-origin `Origin` header or to a configured custom request header
+- `same-site` is rejected unless `AllowSameSite` is explicitly enabled
+- `Sec-Fetch-Site: none` is rejected in strict mode
+- when Fetch Metadata headers are unavailable, the host can fall back to a same-origin or explicitly allowed `Origin` header, or to a configured custom request header
 
 Recommended frontend behavior for compatibility paths:
 
 - for browser-based same-origin calls, let the browser send `Sec-Fetch-Site` naturally
+- for cookie-authenticated unsafe calls, send the antiforgery token expected by the host
 - for older clients that do not send Fetch Metadata, send a same-origin `Origin` header when possible
 - if neither header is available, configure a custom header such as `X-Recrovit-Proxy-Intent` and send the expected value from the trusted frontend
+- for non-browser WebSocket clients, enable `AllowMissingWebSocketOrigin` only when that compatibility path is actually required
 
 Example:
 
@@ -241,10 +245,12 @@ Example:
   "Recrovit": {
     "OpenIdConnect": {
       "Host": {
-        "DownstreamProxyGetProtection": {
-          "Enabled": true,
+        "DownstreamProxyRequestProtection": {
           "Mode": "FetchMetadataFirst",
-          "AllowOriginFallback": true,
+          "AllowSameSite": false,
+          "AllowedHttpOrigins": [ "https://app.example.com" ],
+          "AllowedWebSocketOrigins": [ "https://app.example.com" ],
+          "AllowMissingWebSocketOrigin": false,
           "CustomHeaderName": "X-Recrovit-Proxy-Intent",
           "CustomHeaderValue": "same-site"
         }
@@ -254,7 +260,7 @@ Example:
 }
 ```
 
-This protection is a browser-request defense for the generic proxy surface. It does not replace endpoint authorization.
+This protection is a browser-request defense for the generic proxy surface. It does not replace endpoint authorization, and the unsafe-method path assumes the host already exposes an antiforgery token issuance mechanism for its frontend.
 
 ### `Recrovit:OpenIdConnect:TokenCache`
 
