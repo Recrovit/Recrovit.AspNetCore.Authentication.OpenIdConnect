@@ -270,15 +270,18 @@ Key responsibilities:
 
 - enables forwarded header processing when the host is behind a trusted proxy
 - defines the trusted reverse proxy IP addresses and networks that may supply forwarded headers
-- configures a shared file-system location for Data Protection keys
+- configures legacy shared file-system persistence for Data Protection keys
+- selects the Data Protection startup validation profile
 
 `DataProtectionKeysPath` is an optional path setting, not a separate on/off switch. It is the shared directory used by ASP.NET Core Data Protection to persist encryption keys. Yes, the application writes key files into this directory.
 
 If you set it, the package persists Data Protection keys in that directory. If you omit it, ASP.NET Core falls back to its default key storage behavior for the current environment.
 
-Use it when you need authentication cookies and encrypted token-cache entries to remain readable across restarts or across multiple app instances. In production, this package requires `DataProtectionKeysPath` to be configured so all instances can decrypt the same protected data consistently.
+Use it when you need authentication cookies and encrypted token-cache entries to remain readable across restarts or across multiple app instances. In production, this package requires an explicit shared Data Protection key repository, which can come from `DataProtectionKeysPath` or from host-level Data Protection configuration.
 
-In development or simple single-instance local runs, you can usually omit it. In production, treat it as required and point it to a persistent shared location such as a mounted volume or network share.
+In development or simple single-instance local runs, you can usually omit it. In production, treat an explicit shared key repository as required. For new hosts, prefer configuring Data Protection directly through the new callback overload or host-level `services.AddDataProtection()` setup.
+
+`DataProtectionSecurityProfile` defaults to `Standard`. Set it to `Hardened` to require explicit application isolation and key-ring encryption when the host starts in production.
 
 ## Minimal Configuration Example
 
@@ -337,12 +340,140 @@ In development or simple single-instance local runs, you can usually omit it. In
       },
       "Infrastructure": {
         "ForwardedHeadersEnabled": false,
-        "DataProtectionKeysPath": "/shared/dpkeys"
+        "DataProtectionKeysPath": "/shared/dpkeys",
+        "DataProtectionSecurityProfile": "Standard"
       }
     }
   }
 }
 ```
+
+## Data Protection Configuration
+
+The package uses ASP.NET Core Data Protection for authentication cookies and for encrypting distributed token-cache payloads. Existing applications can keep using `Recrovit:OpenIdConnect:Infrastructure:DataProtectionKeysPath` without code changes.
+
+For new applications, prefer configuring Data Protection explicitly by using either host-level `services.AddDataProtection()` or the `AddOidcAuthenticationInfrastructure(...)` callback overload:
+
+```csharp
+using System.IO;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+var keyDirectory = new DirectoryInfo("/shared/dpkeys");
+
+builder.Services.AddOidcAuthenticationInfrastructure(
+    builder.Configuration,
+    builder.Environment,
+    dataProtection => dataProtection
+        .SetApplicationName("MyCompany.MyApplication.Production")
+        .PersistKeysToFileSystem(keyDirectory));
+```
+
+Use the same application name across all instances of the same deployed application. Use different application names for different applications and different environments. The application name improves isolation, but it does not replace the need for separate key repositories when you need strong security separation.
+
+### Single-Instance Or Simple IIS Hosts
+
+For backward-compatible, simple deployments, `DataProtectionKeysPath` remains supported:
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Infrastructure": {
+        "DataProtectionKeysPath": "C:\\Auth\\dpkeys"
+      }
+    }
+  }
+}
+```
+
+This is still valid in `Standard` mode. In production, if the key ring is persisted explicitly but no key-ring encryption is configured, the package logs a warning and continues for backward compatibility.
+
+### Multi-Instance Deployments
+
+Multi-instance hosts should use a shared Data Protection key repository and a shared `IDistributedCache` backend. The shared key repository can be configured through `DataProtectionKeysPath`, through the callback overload, or through host-level `services.AddDataProtection()` registration before the OIDC package is added.
+
+### Certificate-Based Key-Ring Encryption
+
+```csharp
+using System.IO;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+var keyDirectory = new DirectoryInfo("/shared/dpkeys");
+var keyRingCertificate = LoadDataProtectionCertificate();
+
+builder.Services.AddOidcAuthenticationInfrastructure(
+    builder.Configuration,
+    builder.Environment,
+    dataProtection => dataProtection
+        .SetApplicationName("MyCompany.MyApplication.Production")
+        .PersistKeysToFileSystem(keyDirectory)
+        .ProtectKeysWithCertificate(keyRingCertificate));
+```
+
+Keep old decryption certificates available during certificate rotation until every active key ring entry that depends on them has aged out or been re-encrypted.
+
+### Windows DPAPI
+
+```csharp
+using System.IO;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+var keyDirectory = new DirectoryInfo(@"C:\Auth\dpkeys");
+
+builder.Services.AddOidcAuthenticationInfrastructure(
+    builder.Configuration,
+    builder.Environment,
+    dataProtection => dataProtection
+        .SetApplicationName("MyCompany.MyApplication.Production")
+        .PersistKeysToFileSystem(keyDirectory)
+        .ProtectKeysWithDpapi());
+```
+
+### External KMS Or Provider-Specific Storage
+
+The base package does not reference Azure, AWS, Vault, or any other provider SDK. Install the provider-specific ASP.NET Core Data Protection extensions in the host application, then call them from the callback or from host-level Data Protection registration:
+
+```csharp
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+builder.Services.AddOidcAuthenticationInfrastructure(
+    builder.Configuration,
+    builder.Environment,
+    dataProtection => dataProtection
+        .SetApplicationName("MyCompany.MyApplication.Production")
+        .PersistKeysToExternalStorage(...)
+        .ProtectKeysWithExternalKeyManagementSystem(...));
+```
+
+### Standard And Hardened Profiles
+
+`Standard` preserves existing behavior:
+
+- `DataProtectionKeysPath` remains supported
+- explicit application isolation is recommended but not required
+- explicit key-ring encryption is recommended but not required
+
+`Hardened` adds startup validation:
+
+- production requires explicit application isolation through `SetApplicationName(...)`
+- production requires key-ring encryption when an explicit repository is configured
+- development logs warnings instead of blocking startup
+
+Example:
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Infrastructure": {
+        "DataProtectionSecurityProfile": "Hardened"
+      }
+    }
+  }
+}
+```
+
+Use separate certificates for OIDC client authentication and Data Protection key-ring encryption whenever possible. They serve different security purposes and should not share the same private key by default.
 
 ## Certificate-Based Client Authentication
 
@@ -661,9 +792,15 @@ In production:
 
 - a shared distributed cache is required for user token storage
 - `AddDistributedMemoryCache` is not sufficient for multi-instance production use
-- `HostSecurityOptions.DataProtectionKeysPath` must be configured so Data Protection keys are shared
+- an explicit shared Data Protection key repository is required
+- `HostSecurityOptions.DataProtectionKeysPath` remains supported as a backward-compatible way to configure that repository
 - `TokenCacheOptions.CacheKeyHmacSecret` must be shared across all instances
 - multi-instance deployments should replace the default session refresh lock/store implementations with shared implementations that can coordinate versioned session-state updates across nodes
+
+When `DataProtectionSecurityProfile` is set to `Hardened`, production startup also requires:
+
+- explicit Data Protection application isolation through `SetApplicationName(...)`
+- explicit key-ring encryption when the key repository is configured explicitly
 
 `AddRecrovitOpenIdConnectInfrastructure()` registers `AddDistributedMemoryCache()` as a safe default for development and simple single-instance runs. Production hosts should replace that default with a shared `IDistributedCache` backend so encrypted token-cache entries remain available across restarts and across multiple application instances.
 

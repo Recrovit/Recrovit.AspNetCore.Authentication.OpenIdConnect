@@ -6,6 +6,11 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 
 ### Features Added
 
+- Extensible Data Protection configuration
+  - Added a new `AddOidcAuthenticationInfrastructure(..., Action<IDataProtectionBuilder>? configureDataProtection)` overload so host applications can extend or override the package Data Protection setup.
+  - Added `DataProtectionSecurityProfile` with backward-compatible `Standard` behavior and opt-in `Hardened` startup validation.
+  - Kept `Recrovit:OpenIdConnect:Infrastructure:DataProtectionKeysPath` supported as a legacy configuration path while allowing host-level or callback-based explicit key repository configuration.
+
 - Provider-specific downstream API overrides
   - Added support for `Recrovit:OpenIdConnect:Providers:<provider>:DownstreamApis` overrides on top of the shared downstream API catalog.
   - Allowed provider-specific downstream API entries to override base URL and relative path values, and to replace the shared scope list when a provider-specific `Scopes` section is present.
@@ -33,6 +38,10 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 
 ### Other Changes
 
+- Data Protection diagnostics, tests, and docs
+  - Added startup validation and warning coverage for explicit Data Protection repository, application isolation, and key-ring encryption scenarios.
+  - Expanded test coverage for callback-based configuration, host-preconfigured Data Protection, and `Standard` versus `Hardened` profile behavior.
+  - Updated the README with callback-based configuration, certificate/DPAPI/external KMS examples, and deployment guidance for Data Protection isolation and key rotation.
 - Downstream API configuration coverage
   - Added tests covering provider-specific downstream API overrides and disabling behavior.
   - Expanded configuration documentation for provider-level downstream API customization and disabling.

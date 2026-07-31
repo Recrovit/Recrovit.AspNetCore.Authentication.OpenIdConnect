@@ -6,9 +6,12 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
@@ -77,6 +80,86 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         var options = serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value;
 
         Assert.Equal("/safe-landing", options.RemoteFailureRedirectPath);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesStandardDataProtectionSecurityProfileByDefault()
+    {
+        var configuration = TestConfiguration.Build();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<HostSecurityOptions>>().Value;
+
+        Assert.Equal(DataProtectionSecurityProfile.Standard, options.DataProtectionSecurityProfile);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ConfiguresDataProtectionCallback()
+    {
+        var configuration = TestConfiguration.Build();
+        var callbackRuns = 0;
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment(),
+            dataProtection =>
+            {
+                callbackRuns++;
+                dataProtection.SetApplicationName("Recrovit.Tests");
+                dataProtection.PersistKeysToFileSystem(new DirectoryInfo("/callback-keys"));
+                dataProtection.ProtectKeysWithCertificate(certificate.Certificate);
+            });
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var dataProtectionOptions = serviceProvider.GetRequiredService<IOptions<DataProtectionOptions>>().Value;
+        var keyManagementOptions = serviceProvider.GetRequiredService<IOptions<KeyManagementOptions>>().Value;
+
+        Assert.Equal(1, callbackRuns);
+        Assert.Equal("Recrovit.Tests", dataProtectionOptions.ApplicationDiscriminator);
+        Assert.NotNull(keyManagementOptions.XmlRepository);
+        Assert.NotNull(keyManagementOptions.XmlEncryptor);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsCallbackException()
+    {
+        var configuration = TestConfiguration.Build();
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            services.AddOidcAuthenticationInfrastructure(
+                configuration,
+                new FakeWebHostEnvironment(),
+                _ => throw new InvalidOperationException("callback failed")));
+
+        Assert.Equal("callback failed", ex.Message);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_PreservesHostConfiguredDataProtection()
+    {
+        var configuration = TestConfiguration.Build();
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var services = new ServiceCollection();
+        services.AddDataProtection()
+            .SetApplicationName("Host.Configured")
+            .PersistKeysToFileSystem(new DirectoryInfo("/host-keys"))
+            .ProtectKeysWithCertificate(certificate.Certificate);
+
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var dataProtectionOptions = serviceProvider.GetRequiredService<IOptions<DataProtectionOptions>>().Value;
+        var keyManagementOptions = serviceProvider.GetRequiredService<IOptions<KeyManagementOptions>>().Value;
+
+        Assert.Equal("Host.Configured", dataProtectionOptions.ApplicationDiscriminator);
+        Assert.NotNull(keyManagementOptions.XmlRepository);
+        Assert.NotNull(keyManagementOptions.XmlEncryptor);
     }
 
     [Fact]
@@ -1037,6 +1120,173 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
 
         Assert.Null(exception);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenProductionDataProtectionRepositoryMissing()
+    {
+        var configuration = TestConfiguration.Build();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production });
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("explicit shared Data Protection key repository", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_AllowsProduction_WhenDataProtectionRepositoryConfiguredByCallback()
+    {
+        var configuration = TestConfiguration.Build();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection.PersistKeysToFileSystem(new DirectoryInfo("/callback-keys")));
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_LogsStandardWarning_WhenProductionKeyRepositoryHasNoEncryption()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production });
+        ReplaceDistributedCache(services);
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        var warning = Assert.Single(loggerFactory.Entries, entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("no key-ring encryption configuration was detected", StringComparison.Ordinal));
+        Assert.Contains("no key-ring encryption configuration was detected", warning.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("/keys", warning.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            loggerFactory.Entries.Count(entry =>
+                entry.Level == LogLevel.Warning &&
+                entry.Message.Contains("no key-ring encryption configuration was detected", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenHardenedProductionMissingApplicationIsolation()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionSecurityProfile"] = nameof(DataProtectionSecurityProfile.Hardened),
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection.ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("requires explicit application isolation", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenHardenedProductionMissingEncryption()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionSecurityProfile"] = nameof(DataProtectionSecurityProfile.Hardened),
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection.SetApplicationName("Recrovit.Tests.Hardened"));
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("requires key-ring encryption", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_AllowsStartup_WhenHardenedProductionDataProtectionIsConfigured()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionSecurityProfile"] = nameof(DataProtectionSecurityProfile.Hardened)
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection
+                .SetApplicationName("Recrovit.Tests.Hardened")
+                .PersistKeysToFileSystem(new DirectoryInfo("/hardened-keys"))
+                .ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_LogsWarningsWithoutBlocking_WhenHardenedDevelopmentConfigurationIsIncomplete()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionSecurityProfile"] = nameof(DataProtectionSecurityProfile.Hardened),
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development });
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        Assert.Contains(
+            loggerFactory.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains("requires explicit application isolation", StringComparison.Ordinal));
+        Assert.Contains(
+            loggerFactory.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains("requires key-ring encryption", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -12,6 +12,7 @@ internal static class OidcLogEvents
     public static readonly EventId TicketReceived = new(1005, nameof(TicketReceived));
     public static readonly EventId SessionTokenPersisted = new(1006, nameof(SessionTokenPersisted));
     public static readonly EventId TicketTokensCleared = new(1007, nameof(TicketTokensCleared));
+    public static readonly EventId DataProtectionConfigurationWarning = new(1008, nameof(DataProtectionConfigurationWarning));
 
     public static readonly EventId LoginRequested = new(2000, nameof(LoginRequested));
     public static readonly EventId LogoutRequested = new(2001, nameof(LogoutRequested));
@@ -123,6 +124,9 @@ internal static partial class OidcInfrastructureLog
 
     [LoggerMessage(EventId = 1007, Level = LogLevel.Debug, Message = "OIDC ticket tokens cleared from authentication properties for provider {ProviderName}.")]
     public static partial void TicketTokensCleared(ILogger logger, string providerName);
+
+    [LoggerMessage(EventId = 1008, Level = LogLevel.Warning, Message = "{Message}")]
+    public static partial void DataProtectionConfigurationWarning(ILogger logger, string message);
 }
 
 internal static partial class OidcEndpointLog

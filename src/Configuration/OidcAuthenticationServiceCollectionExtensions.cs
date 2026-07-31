@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
@@ -40,6 +41,21 @@ public static class OidcAuthenticationServiceCollectionExtensions
         this IServiceCollection services,
         IConfiguration configuration,
         IWebHostEnvironment environment)
+        => services.AddOidcAuthenticationInfrastructure(configuration, environment, configureDataProtection: null);
+
+    /// <summary>
+    /// Registers the generic OIDC authentication infrastructure for an ASP.NET Core host.
+    /// </summary>
+    /// <param name="services">The service collection to configure.</param>
+    /// <param name="configuration">The application configuration used to bind authentication options.</param>
+    /// <param name="environment">The current hosting environment.</param>
+    /// <param name="configureDataProtection">Optional callback to extend the shared Data Protection configuration.</param>
+    /// <returns>The same service collection instance.</returns>
+    public static IServiceCollection AddOidcAuthenticationInfrastructure(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        IWebHostEnvironment environment,
+        Action<IDataProtectionBuilder>? configureDataProtection)
     {
         var hostSection = OpenIdConnectConfigurationResolver.GetHostSection(configuration);
         var tokenCacheSection = OpenIdConnectConfigurationResolver.GetTokenCacheSection(configuration);
@@ -366,11 +382,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddSingleton<IAuthorizationMiddlewareResultHandler, ApiAwareAuthorizationMiddlewareResultHandler>();
 
         var hostSecurityOptions = infrastructureSection.Get<HostSecurityOptions>();
-        var dataProtectionBuilder = services.AddDataProtection();
-        if (!string.IsNullOrWhiteSpace(hostSecurityOptions?.DataProtectionKeysPath))
-        {
-            dataProtectionBuilder.PersistKeysToFileSystem(new DirectoryInfo(hostSecurityOptions.DataProtectionKeysPath));
-        }
+        ConfigureDataProtection(services, hostSecurityOptions, configureDataProtection);
 
         services.AddSingleton<IStartupFilter>(_ => new ConfigurationStartupFilter(environment));
 
@@ -418,6 +430,103 @@ public static class OidcAuthenticationServiceCollectionExtensions
         }
 
         return string.IsNullOrEmpty(uri.PathAndQuery) || uri.PathAndQuery == "/";
+    }
+
+    private static void ConfigureDataProtection(
+        IServiceCollection services,
+        HostSecurityOptions? hostSecurityOptions,
+        Action<IDataProtectionBuilder>? configureDataProtection)
+    {
+        var dataProtectionBuilder = services.AddDataProtection();
+        if (!string.IsNullOrWhiteSpace(hostSecurityOptions?.DataProtectionKeysPath))
+        {
+            dataProtectionBuilder.PersistKeysToFileSystem(new DirectoryInfo(hostSecurityOptions.DataProtectionKeysPath));
+        }
+
+        configureDataProtection?.Invoke(dataProtectionBuilder);
+    }
+
+    private static DataProtectionConfigurationState GetDataProtectionConfigurationState(IServiceProvider services)
+    {
+        var dataProtectionOptions = services.GetRequiredService<IOptions<DataProtectionOptions>>().Value;
+        var keyManagementOptions = services.GetRequiredService<IOptions<KeyManagementOptions>>().Value;
+
+        return new DataProtectionConfigurationState(
+            HasExplicitApplicationIsolation: !string.IsNullOrWhiteSpace(dataProtectionOptions.ApplicationDiscriminator),
+            HasExplicitRepository: keyManagementOptions.XmlRepository is not null,
+            HasKeyRingEncryption: keyManagementOptions.XmlEncryptor is not null);
+    }
+
+    private static void ValidateDataProtectionConfiguration(
+        IServiceProvider services,
+        IWebHostEnvironment environment,
+        ILogger logger,
+        HostSecurityOptions hostSecurityOptions)
+    {
+        var state = GetDataProtectionConfigurationState(services);
+
+        if (!environment.IsProduction())
+        {
+            if (hostSecurityOptions.DataProtectionSecurityProfile == DataProtectionSecurityProfile.Hardened)
+            {
+                LogHardenedDataProtectionWarnings(logger, state);
+            }
+
+            return;
+        }
+
+        if (!state.HasExplicitRepository)
+        {
+            var missingRepositoryMessage =
+                "Production requires an explicit shared Data Protection key repository. Configure Recrovit:OpenIdConnect:Infrastructure:DataProtectionKeysPath or configure the host Data Protection key repository explicitly.";
+            OidcInfrastructureLog.StartupValidationFailed(logger, "data-protection-repository", missingRepositoryMessage);
+            throw new InvalidOperationException(missingRepositoryMessage);
+        }
+
+        if (hostSecurityOptions.DataProtectionSecurityProfile == DataProtectionSecurityProfile.Hardened)
+        {
+            if (!state.HasExplicitApplicationIsolation)
+            {
+                var missingIsolationMessage =
+                    "Hardened Data Protection requires explicit application isolation. Configure SetApplicationName(...) for the host application.";
+                OidcInfrastructureLog.StartupValidationFailed(logger, "data-protection-application-isolation", missingIsolationMessage);
+                throw new InvalidOperationException(missingIsolationMessage);
+            }
+
+            if (!state.HasKeyRingEncryption)
+            {
+                var missingEncryptionMessage =
+                    "Hardened Data Protection requires key-ring encryption when an explicit key repository is configured. Configure a certificate, KMS, DPAPI, or another IXmlEncryptor implementation.";
+                OidcInfrastructureLog.StartupValidationFailed(logger, "data-protection-key-ring-encryption", missingEncryptionMessage);
+                throw new InvalidOperationException(missingEncryptionMessage);
+            }
+
+            return;
+        }
+
+        if (!state.HasKeyRingEncryption)
+        {
+            OidcInfrastructureLog.DataProtectionConfigurationWarning(
+                logger,
+                "The Data Protection key ring is persisted to an explicit location, but no key-ring encryption configuration was detected. This configuration is supported for backward compatibility. Consider protecting the key ring with a certificate, DPAPI, KMS, or another IXmlEncryptor implementation.");
+        }
+    }
+
+    private static void LogHardenedDataProtectionWarnings(ILogger logger, DataProtectionConfigurationState state)
+    {
+        if (!state.HasExplicitApplicationIsolation)
+        {
+            OidcInfrastructureLog.DataProtectionConfigurationWarning(
+                logger,
+                "Hardened Data Protection requires explicit application isolation. Configure SetApplicationName(...) for the host application.");
+        }
+
+        if (state.HasExplicitRepository && !state.HasKeyRingEncryption)
+        {
+            OidcInfrastructureLog.DataProtectionConfigurationWarning(
+                logger,
+                "Hardened Data Protection requires key-ring encryption when an explicit key repository is configured. Configure a certificate, KMS, DPAPI, or another IXmlEncryptor implementation.");
+        }
     }
 
     private static void EnsureLocalSessionIdClaim(ClaimsPrincipal principal)
@@ -478,6 +587,8 @@ public static class OidcAuthenticationServiceCollectionExtensions
                     $"{OpenIdConnectConfigurationResolver.RootSectionName}:Providers:<provider>:Scopes and downstream API scopes must define at least one non-empty effective scope.");
             }
 
+            ValidateDataProtectionConfiguration(services, environment, logger, hostSecurityOptions);
+
             if (!environment.IsProduction())
             {
                 return;
@@ -525,16 +636,11 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 throw new InvalidOperationException(
                     "Production requires a shared distributed cache for user token storage. Replace AddDistributedMemoryCache with a shared implementation.");
             }
-
-            if (string.IsNullOrWhiteSpace(hostSecurityOptions.DataProtectionKeysPath))
-            {
-                OidcInfrastructureLog.StartupValidationFailed(
-                    logger,
-                    "data-protection-keys",
-                    $"Production requires {OpenIdConnectConfigurationResolver.RootSectionName}:Infrastructure:DataProtectionKeysPath for shared Data Protection keys.");
-                throw new InvalidOperationException(
-                    $"Production requires {OpenIdConnectConfigurationResolver.RootSectionName}:Infrastructure:DataProtectionKeysPath for shared Data Protection keys.");
-            }
         }
     }
+
+    private sealed record DataProtectionConfigurationState(
+        bool HasExplicitApplicationIsolation,
+        bool HasExplicitRepository,
+        bool HasKeyRingEncryption);
 }
