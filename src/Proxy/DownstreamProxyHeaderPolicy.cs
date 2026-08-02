@@ -13,6 +13,7 @@ internal static class DownstreamProxyHeaderPolicy
     {
         "Accept",
         "Accept-Language",
+        "Accept-Encoding",
         "If-Modified-Since",
         "If-None-Match"
     };

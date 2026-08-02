@@ -168,7 +168,7 @@ Each downstream API definition also supports:
 
 Header forwarding defaults:
 
-- the proxy forwards these request headers by default: `Accept`, `Accept-Language`, `If-None-Match`, `If-Modified-Since`
+- the proxy forwards these request headers by default: `Accept`, `Accept-Language`, `Accept-Encoding`, `If-None-Match`, `If-Modified-Since`
 - `IncludeDefaultForwardedRequestHeaders` defaults to `true`
 - set `IncludeDefaultForwardedRequestHeaders: false` to opt out per API
 - there is no wildcard forwarding; the previous client-controlled `rgf-*` pattern is not supported
