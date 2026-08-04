@@ -214,7 +214,10 @@ public sealed class OidcDownstreamUserTokenProvider : IDownstreamUserTokenProvid
             throw new OidcTokenRefreshFailedException("The OIDC token endpoint is not available from the static configuration or the OIDC metadata.");
         }
 
-        var httpsRequirementError = OidcEndpointHttpsValidator.GetProductionRequirementError(tokenEndpoint, hostEnvironment, "the OIDC token endpoint");
+        var httpsRequirementError = OidcEndpointHttpsValidator.GetProductionRequirementError(
+            tokenEndpoint,
+            hostEnvironment.IsProduction(),
+            "the OIDC token endpoint");
         if (httpsRequirementError is not null)
         {
             throw new OidcTokenRefreshFailedException(httpsRequirementError);

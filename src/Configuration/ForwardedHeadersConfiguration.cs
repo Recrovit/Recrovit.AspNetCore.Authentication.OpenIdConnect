@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.Extensions.Hosting;
 using System.Net;
 using SystemIPNetwork = System.Net.IPNetwork;
 
@@ -36,19 +35,18 @@ internal static class ForwardedHeadersConfiguration
         return options;
     }
 
-    public static string? GetProductionRequirementError(HostSecurityOptions hostSecurityOptions, IHostEnvironment environment)
+    public static string? GetProductionRequirementError(HostSecurityOptions hostSecurityOptions, bool enforceProductionReadiness)
     {
         ArgumentNullException.ThrowIfNull(hostSecurityOptions);
-        ArgumentNullException.ThrowIfNull(environment);
 
-        if (!environment.IsProduction() || !hostSecurityOptions.ForwardedHeadersEnabled)
+        if (!enforceProductionReadiness || !hostSecurityOptions.ForwardedHeadersEnabled)
         {
             return null;
         }
 
         return HasTrustedProxyConfiguration(hostSecurityOptions)
             ? null
-            : $"Production requires {KnownProxiesConfigurationPath} or {KnownNetworksConfigurationPath} when {InfrastructureSectionPath}:ForwardedHeadersEnabled is true.";
+            : $"Production-readiness validation requires {KnownProxiesConfigurationPath} or {KnownNetworksConfigurationPath} when {InfrastructureSectionPath}:ForwardedHeadersEnabled is true.";
     }
 
     public static bool HasTrustedProxyConfiguration(HostSecurityOptions hostSecurityOptions)

@@ -73,6 +73,12 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var enforceProductionReadiness = builder.IsRecrovitOpenIdConnectProductionReadinessEnforced();
+if (enforceProductionReadiness)
+{
+    // Configure host-level production-grade dependencies before registering the package.
+}
+
 builder.AddRecrovitOpenIdConnectInfrastructure();
 
 var app = builder.Build();
@@ -524,12 +530,15 @@ builder.Services.AddOidcAuthenticationInfrastructure(
 - `DataProtectionKeysPath` remains supported
 - explicit application isolation is recommended but not required
 - explicit key-ring encryption is recommended but not required
+- production-readiness validation runs only in the `Production` environment unless explicitly enabled for `Development`
 
 `Hardened` adds startup validation:
 
 - production requires explicit application isolation through `SetApplicationName(...)`
 - production requires key-ring encryption when an explicit repository is configured
 - development logs warnings instead of blocking startup
+
+To test the full production startup requirements in a local `Development` environment, enable the infrastructure opt-in below. This is an environment/configuration switch, not a `Debug` build switch.
 
 Example:
 
@@ -538,12 +547,15 @@ Example:
   "Recrovit": {
     "OpenIdConnect": {
       "Infrastructure": {
-        "DataProtectionSecurityProfile": "Hardened"
+        "DataProtectionSecurityProfile": "Hardened",
+        "RequireProductionReadinessInDevelopment": true
       }
     }
   }
 }
 ```
+
+With `RequireProductionReadinessInDevelopment: true`, the same startup enforcement used in `Production` also blocks application startup in `Development`, including HTTPS endpoint validation, trusted forwarded-header proxy requirements, shared Data Protection key repository requirements, and shared distributed cache requirements.
 
 Use separate certificates for OIDC client authentication and Data Protection key-ring encryption whenever possible. They serve different security purposes and should not share the same private key by default.
 
@@ -911,7 +923,7 @@ builder.Services.AddDistributedSqlServerCache(options =>
     options.ConnectionString = builder.Configuration.GetConnectionString("RecrovitAuthCache")
         ?? throw new InvalidOperationException("Connection string 'RecrovitAuthCache' is required.");
     options.SchemaName = "dbo";
-    options.TableName = "OidcTokenCache";
+    options.TableName = "RgfOidcTokenCache";
 });
 
 builder.AddRecrovitOpenIdConnectInfrastructure();
@@ -921,7 +933,7 @@ Create the SQL cache table before running the host:
 
 ```bash
 dotnet tool install --global dotnet-sql-cache
-dotnet sql-cache create "Server=.;Database=RecrovitAuth;Trusted_Connection=True;TrustServerCertificate=True" dbo OidcTokenCache
+dotnet sql-cache create "Server=.;Database=RecrovitAuth;Trusted_Connection=True;TrustServerCertificate=True" dbo RgfOidcTokenCache
 ```
 
 If your environment uses different naming conventions, database separation rules, or SQL authentication settings, adjust the connection string, schema, and table name to match your production standards.

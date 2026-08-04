@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -13,6 +14,18 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 /// </summary>
 public static class RecrovitOpenIdConnectHostExtensions
 {
+    /// <summary>
+    /// Determines whether the Recrovit OpenID Connect infrastructure will enforce production-readiness startup validation for the current host.
+    /// </summary>
+    /// <param name="builder">The web application builder to evaluate.</param>
+    /// <returns><see langword="true"/> when production-readiness validation is enforced for the current environment; otherwise, <see langword="false"/>.</returns>
+    public static bool IsRecrovitOpenIdConnectProductionReadinessEnforced(this WebApplicationBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        return OidcProductionReadinessEvaluator.IsEnforced(builder.Environment, builder.Configuration);
+    }
+
     /// <summary>
     /// Registers the reusable Recrovit OpenID Connect application infrastructure.
     /// </summary>

@@ -34,4 +34,9 @@ public sealed class HostSecurityOptions
     /// Gets the Data Protection startup validation profile.
     /// </summary>
     public DataProtectionSecurityProfile DataProtectionSecurityProfile { get; init; } = DataProtectionSecurityProfile.Standard;
+
+    /// <summary>
+    /// Gets a value indicating whether production-readiness startup validation should also block startup in development environments.
+    /// </summary>
+    public bool RequireProductionReadinessInDevelopment { get; init; }
 }

@@ -481,8 +481,9 @@ public static class OidcAuthenticationServiceCollectionExtensions
         HostSecurityOptions hostSecurityOptions)
     {
         var state = GetDataProtectionConfigurationState(services);
+        var enforceProductionReadiness = ShouldEnforceProductionReadiness(environment, hostSecurityOptions);
 
-        if (!environment.IsProduction())
+        if (!enforceProductionReadiness)
         {
             if (hostSecurityOptions.DataProtectionSecurityProfile == DataProtectionSecurityProfile.Hardened)
             {
@@ -495,7 +496,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
         if (!state.HasExplicitRepository)
         {
             var missingRepositoryMessage =
-                "Production requires an explicit shared Data Protection key repository. Configure Recrovit:OpenIdConnect:Infrastructure:DataProtectionKeysPath or configure the host Data Protection key repository explicitly.";
+                "Production-readiness validation requires an explicit shared Data Protection key repository. Configure Recrovit:OpenIdConnect:Infrastructure:DataProtectionKeysPath or configure the host Data Protection key repository explicitly.";
             OidcInfrastructureLog.StartupValidationFailed(logger, "data-protection-repository", missingRepositoryMessage);
             throw new InvalidOperationException(missingRepositoryMessage);
         }
@@ -505,7 +506,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
             if (!state.HasExplicitApplicationIsolation)
             {
                 var missingIsolationMessage =
-                    "Hardened Data Protection requires explicit application isolation. Configure SetApplicationName(...) for the host application.";
+                    "Production-readiness validation with Hardened Data Protection requires explicit application isolation. Configure SetApplicationName(...) for the host application.";
                 OidcInfrastructureLog.StartupValidationFailed(logger, "data-protection-application-isolation", missingIsolationMessage);
                 throw new InvalidOperationException(missingIsolationMessage);
             }
@@ -513,7 +514,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
             if (!state.HasKeyRingEncryption)
             {
                 var missingEncryptionMessage =
-                    "Hardened Data Protection requires key-ring encryption when an explicit key repository is configured. Configure a certificate, KMS, DPAPI, or another IXmlEncryptor implementation.";
+                    "Production-readiness validation with Hardened Data Protection requires key-ring encryption when an explicit key repository is configured. Configure a certificate, KMS, DPAPI, or another IXmlEncryptor implementation.";
                 OidcInfrastructureLog.StartupValidationFailed(logger, "data-protection-key-ring-encryption", missingEncryptionMessage);
                 throw new InvalidOperationException(missingEncryptionMessage);
             }
@@ -607,8 +608,9 @@ public static class OidcAuthenticationServiceCollectionExtensions
             ValidateDataProtectionConfiguration(services, environment, logger, hostSecurityOptions);
             ValidateTokenRefreshCoordinationConfiguration(services, logger);
             ValidateTokenCacheSecretConfiguration(services, environment, logger);
+            var enforceProductionReadiness = ShouldEnforceProductionReadiness(environment, hostSecurityOptions);
 
-            if (!environment.IsProduction())
+            if (!enforceProductionReadiness)
             {
                 return;
             }
@@ -617,7 +619,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
             var authorityHttpsError = OidcEndpointHttpsValidator.GetProductionRequirementError(
                 oidcOptions.Authority,
-                environment,
+                enforceProductionReadiness,
                 $"{OpenIdConnectConfigurationResolver.RootSectionName}:Providers:<provider>:Authority");
             if (authorityHttpsError is not null)
             {
@@ -633,12 +635,12 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 }
 
                 var downstreamHttpsError =
-                    $"Production requires {OpenIdConnectConfigurationResolver.RootSectionName}:DownstreamApis:{apiName}:BaseUrl to be an absolute HTTPS URI.";
+                    $"Production-readiness validation requires {OpenIdConnectConfigurationResolver.RootSectionName}:DownstreamApis:{apiName}:BaseUrl to be an absolute HTTPS URI.";
                 OidcInfrastructureLog.StartupValidationFailed(logger, "downstream-api-https", downstreamHttpsError);
                 throw new InvalidOperationException(downstreamHttpsError);
             }
 
-            var forwardedHeadersError = ForwardedHeadersConfiguration.GetProductionRequirementError(hostSecurityOptions, environment);
+            var forwardedHeadersError = ForwardedHeadersConfiguration.GetProductionRequirementError(hostSecurityOptions, enforceProductionReadiness);
             if (forwardedHeadersError is not null)
             {
                 OidcInfrastructureLog.StartupValidationFailed(logger, "forwarded-headers", forwardedHeadersError);
@@ -651,12 +653,15 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 OidcInfrastructureLog.StartupValidationFailed(
                     logger,
                     "distributed-cache",
-                    "Production requires a shared distributed cache for user token storage.");
+                    "Production-readiness validation requires a shared distributed cache for user token storage.");
                 throw new InvalidOperationException(
-                    "Production requires a shared distributed cache for user token storage. Replace AddDistributedMemoryCache with a shared implementation.");
+                    "Production-readiness validation requires a shared distributed cache for user token storage. Replace AddDistributedMemoryCache with a shared implementation.");
             }
         }
     }
+
+    private static bool ShouldEnforceProductionReadiness(IHostEnvironment environment, HostSecurityOptions hostSecurityOptions)
+        => OidcProductionReadinessEvaluator.IsEnforced(environment, hostSecurityOptions);
 
     private static void ValidateTokenCacheSecretConfiguration(IServiceProvider services, IWebHostEnvironment environment, ILogger logger)
     {
