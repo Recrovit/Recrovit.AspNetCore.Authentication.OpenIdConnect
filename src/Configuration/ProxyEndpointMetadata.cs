@@ -47,4 +47,37 @@ public static class ProxyEndpointConventionBuilderExtensions
         builder.Add(endpointBuilder => endpointBuilder.Metadata.Add(ProxyEndpointMetadata.Instance));
         return builder;
     }
+
+    /// <summary>
+    /// Allows the specified incoming request headers to be forwarded for this proxy endpoint.
+    /// </summary>
+    public static TBuilder WithForwardedRequestHeaders<TBuilder>(this TBuilder builder, params string[] headerNames)
+        where TBuilder : IEndpointConventionBuilder
+    {
+        if (headerNames is null || headerNames.Length == 0 || headerNames.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("At least one non-empty request header name is required.", nameof(headerNames));
+        }
+
+        foreach (var headerName in headerNames)
+        {
+            Proxy.DownstreamProxyHeaderPolicy.ValidateConfiguredRequestHeaderName(headerName, $"endpoint:{headerName}");
+        }
+
+        builder.Add(endpointBuilder => endpointBuilder.Metadata.Add(new ForwardedRequestHeadersMetadata(headerNames)));
+        return builder;
+    }
+}
+
+/// <summary>
+/// Stores additional incoming request header names that may be forwarded for a proxy endpoint.
+/// </summary>
+public sealed class ForwardedRequestHeadersMetadata
+{
+    public ForwardedRequestHeadersMetadata(IReadOnlyList<string> headerNames)
+    {
+        HeaderNames = headerNames;
+    }
+
+    public IReadOnlyList<string> HeaderNames { get; }
 }

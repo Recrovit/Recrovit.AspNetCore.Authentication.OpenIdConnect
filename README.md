@@ -26,6 +26,7 @@ This package exists to provide that combined host infrastructure as a reusable b
 - Provides downstream access tokens for authenticated users through `IDownstreamUserTokenProvider`.
 - Redirects handled OIDC callback failures such as canceled or access-denied sign-in flows to a safe application path instead of surfacing the raw callback error.
 - Provides reusable downstream HTTP proxy and transport/WebSocket proxy infrastructure for OIDC-enabled hosts.
+- Supports endpoint-level request header forwarding for downstream proxy routes through explicit string-based allowlists.
 - Refreshes expired access tokens through the provider's token endpoint when a refresh token is available.
 - Returns `401` and `403` for API-style and proxy requests instead of redirecting to an interactive login flow.
 - Clears local session state and signals reauthentication when a stored token set is no longer usable.
@@ -177,7 +178,7 @@ Header forwarding defaults:
 - the proxy forwards these request headers by default: `Accept`, `Accept-Language`, `Accept-Encoding`, `If-None-Match`, `If-Modified-Since`
 - `IncludeDefaultForwardedRequestHeaders` defaults to `true`
 - set `IncludeDefaultForwardedRequestHeaders: false` to opt out per API
-- there is no wildcard forwarding; the previous client-controlled `rgf-*` pattern is not supported
+- there is no wildcard forwarding
 - request headers such as `Authorization`, `Proxy-Authorization`, `Cookie`, `Host`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Content-Length`, hop-by-hop headers, and `Connection`-declared headers are never forwarded even if configured
 - `ForwardedResponseHeaders` extends a built-in safe response allowlist; host-owned CORS and security headers are always suppressed
 
@@ -207,6 +208,28 @@ app.MapDownstreamApiProxyEndpoints(options =>
 });
 ```
 
+Hosts can also extend the forwarded incoming request-header allowlist per mapped downstream API:
+
+```csharp
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
+
+app.MapDownstreamApiProxyEndpoints(options =>
+{
+    options.ForApi("UserInfoApi")
+        .ForwardRequestHeaders("X-Correlation-ID", "X-Client-Version");
+});
+```
+
+For custom proxy routes that still use `DownstreamProxyEndpointExecutor.ProxyHttpAsync(...)` or `IDownstreamTransportProxyClient`, the same built-in request-header allowlist can be applied directly on the endpoint:
+
+```csharp
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+app.MapGet("/custom/userinfo/{**path}", Handler)
+    .WithForwardedRequestHeaders("X-Correlation-ID")
+    .AsProxyEndpoint();
+```
+
 This maps a generic route pattern:
 
 - `/downstream/{apiName}`
@@ -223,10 +246,18 @@ Behavior:
 - the request is forwarded through the built-in downstream HTTP proxy infrastructure
 - the typed downstream proxy `HttpClient` does not auto-follow redirects and does not store downstream cookies
 - request headers are forwarded from the built-in default request-header set, plus any extra names listed in the matched API definition's `ForwardedRequestHeaders`
+- endpoint-level `ForwardRequestHeaders(...)` values extend that request-header allowlist only for the mapped downstream proxy endpoint
+- direct `WithForwardedRequestHeaders(...)` metadata applies the same allowlist behavior to custom proxy endpoints outside the generic `/downstream/{apiName}` pattern
 - server-generated claim headers remove any same-named client value before the authenticated user's claim-derived value is applied
 - downstream `Location` headers are rewritten back to the public proxy route only when the redirect target stays on the configured downstream origin and under the configured downstream root
 - cookie-authenticated downstream proxy requests are protected against cross-site browser initiation by default, and unsafe methods also require antiforgery validation
 - API-style authorization behavior is preserved, so unauthorized proxy requests return `401` or `403` instead of redirecting to login
+
+Security and forwarding notes:
+
+- endpoint-level request-header forwarding uses the same forbidden-header validation as configuration-based `ForwardedRequestHeaders`
+- request headers such as `Authorization`, `Cookie`, `Host`, `Forwarded`, `Proxy-Authorization`, `Content-Length`, hop-by-hop headers, and `Connection`-declared headers remain blocked even when explicitly requested
+- claim-derived protected headers still override spoofed incoming request-header values with the same name
 
 This capability is intentionally generic. It is useful for BFF-style hosts, server-proxy architectures, and any application that wants to expose downstream APIs through a cookie-authenticated OIDC host without re-implementing proxy routing.
 

@@ -108,6 +108,7 @@ internal static class DownstreamProxyHeaderPolicy
         DownstreamApiDefinition downstreamApi,
         IEnumerable<KeyValuePair<string, StringValues>> incomingHeaders,
         ClaimsPrincipal? user,
+        IReadOnlyList<string> endpointForwardedRequestHeaders,
         IReadOnlyList<DownstreamProxyClaimHeaderMapping> claimHeaderMappings,
         ILogger logger)
     {
@@ -115,6 +116,7 @@ internal static class DownstreamProxyHeaderPolicy
             ? new HashSet<string>(DefaultForwardedRequestHeaders, StringComparer.OrdinalIgnoreCase)
             : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         allowedHeaders.UnionWith(downstreamApi.ForwardedRequestHeaders);
+        allowedHeaders.UnionWith(endpointForwardedRequestHeaders);
         var protectedHeaderNames = new HashSet<string>(
             claimHeaderMappings.Select(static mapping => mapping.HeaderName),
             StringComparer.OrdinalIgnoreCase);

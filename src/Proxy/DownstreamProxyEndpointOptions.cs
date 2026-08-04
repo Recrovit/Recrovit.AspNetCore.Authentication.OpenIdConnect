@@ -56,6 +56,7 @@ public sealed class DownstreamProxyEndpointApiOptions
 {
     private readonly string downstreamApiName;
     private readonly List<DownstreamProxyClaimHeaderMapping> claimHeaderMappings = [];
+    private readonly List<string> forwardedRequestHeaders = [];
 
     internal DownstreamProxyEndpointApiOptions(string downstreamApiName)
     {
@@ -80,10 +81,25 @@ public sealed class DownstreamProxyEndpointApiOptions
         return this;
     }
 
+    /// <summary>
+    /// Forwards the specified incoming request headers for this downstream API endpoint mapping.
+    /// </summary>
+    public DownstreamProxyEndpointApiOptions ForwardRequestHeaders(params string[] headerNames)
+    {
+        if (headerNames is null || headerNames.Length == 0 || headerNames.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("At least one non-empty request header name is required.", nameof(headerNames));
+        }
+
+        forwardedRequestHeaders.AddRange(headerNames);
+        return this;
+    }
+
     internal DownstreamProxyEndpointApiMetadata Build()
     {
         var usedHeaderNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var finalizedMappings = new List<DownstreamProxyClaimHeaderMapping>(claimHeaderMappings.Count);
+        var finalizedForwardedRequestHeaders = new List<string>(forwardedRequestHeaders.Count);
 
         foreach (var mapping in claimHeaderMappings)
         {
@@ -98,7 +114,20 @@ public sealed class DownstreamProxyEndpointApiOptions
             finalizedMappings.Add(mapping);
         }
 
-        return new DownstreamProxyEndpointApiMetadata(finalizedMappings);
+        foreach (var headerName in forwardedRequestHeaders)
+        {
+            DownstreamProxyHeaderPolicy.ValidateConfiguredRequestHeaderName(headerName, $"{downstreamApiName}:{headerName}");
+
+            if (!usedHeaderNames.Add(headerName))
+            {
+                throw new InvalidOperationException(
+                    $"The downstream proxy endpoint configuration for API '{downstreamApiName}' defines duplicate request header '{headerName}'.");
+            }
+
+            finalizedForwardedRequestHeaders.Add(headerName);
+        }
+
+        return new DownstreamProxyEndpointApiMetadata(finalizedMappings, finalizedForwardedRequestHeaders);
     }
 }
 
@@ -124,14 +153,19 @@ internal sealed class DownstreamProxyEndpointMetadata
 
 internal sealed class DownstreamProxyEndpointApiMetadata
 {
-    public static DownstreamProxyEndpointApiMetadata Empty { get; } = new([]);
+    public static DownstreamProxyEndpointApiMetadata Empty { get; } = new([], []);
 
-    public DownstreamProxyEndpointApiMetadata(IReadOnlyList<DownstreamProxyClaimHeaderMapping> claimHeaderMappings)
+    public DownstreamProxyEndpointApiMetadata(
+        IReadOnlyList<DownstreamProxyClaimHeaderMapping> claimHeaderMappings,
+        IReadOnlyList<string> forwardedRequestHeaders)
     {
         ClaimHeaderMappings = claimHeaderMappings;
+        ForwardedRequestHeaders = forwardedRequestHeaders;
     }
 
     public IReadOnlyList<DownstreamProxyClaimHeaderMapping> ClaimHeaderMappings { get; }
+
+    public IReadOnlyList<string> ForwardedRequestHeaders { get; }
 }
 
 internal sealed class DownstreamProxyClaimHeaderMapping

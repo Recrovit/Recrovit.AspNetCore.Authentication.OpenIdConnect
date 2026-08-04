@@ -9,6 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
@@ -266,6 +267,138 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Empty(proxyClient.Headers);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ForwardsEndpointConfiguredRequestHeaders()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        await using var app = await CreateApplicationAsync(
+            proxyClient,
+            configureEndpoints: options => options.ForApi("GraphApi")
+                .ForwardRequestHeaders("X-Injected"));
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/downstream/GraphApi/me");
+        request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+        request.Headers.TryAddWithoutValidation("X-Injected", "value-1");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var forwardedHeaders = proxyClient.Headers.ToDictionary(static header => header.Key, static header => header.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(new[] { "value-1" }, forwardedHeaders["X-Injected"]);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_MergesConfiguredAndEndpointRequestHeaders()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+        var catalog = new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SessionValidationApi"] = new()
+            {
+                BaseUrl = "https://api.example.com",
+                Scopes = ["openid"]
+            },
+            ["GraphApi"] = new()
+            {
+                BaseUrl = "https://graph.example.com",
+                Scopes = ["graph.read"],
+                ForwardedRequestHeaders = ["X-Configured"]
+            }
+        });
+
+        await using var app = await CreateApplicationAsync(
+            proxyClient,
+            downstreamApiCatalog: catalog,
+            configureEndpoints: options => options.ForApi("GraphApi")
+                .ForwardRequestHeaders("X-Endpoint"));
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/downstream/GraphApi/me");
+        request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+        request.Headers.TryAddWithoutValidation("X-Configured", "config-value");
+        request.Headers.TryAddWithoutValidation("X-Endpoint", "endpoint-value");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var forwardedHeaders = proxyClient.Headers.ToDictionary(static header => header.Key, static header => header.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(new[] { "config-value" }, forwardedHeaders["X-Configured"]);
+        Assert.Equal(new[] { "endpoint-value" }, forwardedHeaders["X-Endpoint"]);
+    }
+
+    [Fact]
+    public async Task ProxyHttpAsync_ForwardsDirectEndpointMetadataRequestHeaders()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        await using var app = await CreateApplicationAsync(
+            proxyClient,
+            configureApp: app =>
+            {
+                app.MapGet("/custom/GraphApi/me", (HttpContext context, IDownstreamHttpProxyClient client, CancellationToken cancellationToken) =>
+                        DownstreamProxyEndpointExecutor.ProxyHttpAsync(context, client, "GraphApi", context.User, cancellationToken))
+                    .WithForwardedRequestHeaders("X-Trace-Id")
+                    .AsProxyEndpoint()
+                    .RequireAuthorization()
+                    .DisableAuthRedirects();
+            });
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/custom/GraphApi/me");
+        request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+        request.Headers.TryAddWithoutValidation("X-Trace-Id", "trace-42");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var forwardedHeaders = proxyClient.Headers.ToDictionary(static header => header.Key, static header => header.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(new[] { "trace-42" }, forwardedHeaders["X-Trace-Id"]);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ThrowsForForbiddenEndpointRequestHeader()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateApplicationAsync(
+            proxyClient,
+            configureEndpoints: options => options.ForApi("GraphApi")
+                .ForwardRequestHeaders("Authorization")));
+
+        Assert.Contains("Authorization", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_ThrowsForDuplicateEndpointRequestHeader()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(string.Empty)
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateApplicationAsync(
+            proxyClient,
+            configureEndpoints: options => options.ForApi("GraphApi")
+                .ForwardRequestHeaders("X-Test", "x-test")));
+
+        Assert.Contains("duplicate", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("X-Test", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1011,6 +1144,7 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         IAntiforgery? antiforgery = null,
         IAntiforgeryValidationFeature? antiforgeryFeature = null,
         Action<DownstreamProxyEndpointOptions>? configureEndpoints = null,
+        Action<WebApplication>? configureApp = null,
         string routePrefix = DownstreamApiProxyEndpointRouteBuilderExtensions.DefaultRoutePrefix,
         ClaimsPrincipal? user = null)
     {
@@ -1091,6 +1225,7 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         {
             app.MapDownstreamApiProxyEndpoints(configureEndpoints, routePrefix);
         }
+        configureApp?.Invoke(app);
 
         await app.StartAsync(TestContext.Current.CancellationToken);
         return app;

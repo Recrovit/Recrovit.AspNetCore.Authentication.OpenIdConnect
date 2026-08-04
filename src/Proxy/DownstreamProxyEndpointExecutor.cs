@@ -47,12 +47,19 @@ public static class DownstreamProxyEndpointExecutor
         var logger = context.RequestServices
             .GetRequiredService<ILoggerFactory>()
             .CreateLogger(typeof(DownstreamProxyEndpointExecutor).FullName!);
-        var endpointMetadata = context.GetEndpoint()?.Metadata.GetMetadata<DownstreamProxyEndpointMetadata>();
+        var endpoint = context.GetEndpoint();
+        var endpointMetadata = endpoint?.Metadata.GetMetadata<DownstreamProxyEndpointMetadata>();
         var apiMetadata = endpointMetadata?.GetApiMetadata(downstreamApiName) ?? DownstreamProxyEndpointApiMetadata.Empty;
+        var directForwardedRequestHeaders = endpoint?.Metadata
+            .GetOrderedMetadata<ForwardedRequestHeadersMetadata>()
+            .SelectMany(static metadata => metadata.HeaderNames)
+            .ToArray()
+            ?? [];
         var forwardedHeaders = DownstreamProxyHeaderPolicy.CreateForwardedRequestHeaders(
             downstreamApi,
             context.Request.Headers,
             user,
+            apiMetadata.ForwardedRequestHeaders.Concat(directForwardedRequestHeaders).ToArray(),
             apiMetadata.ClaimHeaderMappings,
             logger);
 

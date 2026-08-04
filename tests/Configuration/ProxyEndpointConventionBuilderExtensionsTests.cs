@@ -50,4 +50,22 @@ public sealed class ProxyEndpointConventionBuilderExtensionsTests
             .SelectMany(static dataSource => dataSource.Endpoints));
         Assert.NotNull(endpoint.Metadata.GetMetadata<ProxyEndpointMetadata>());
     }
+
+    [Fact]
+    public async Task WithForwardedRequestHeaders_AddsMetadataToEndpoint()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        var app = builder.Build();
+
+        app.MapGet("/proxy", () => "ok").WithForwardedRequestHeaders("X-Trace-Id");
+
+        await app.StartAsync(TestContext.Current.CancellationToken);
+
+        var endpoint = Assert.Single(app.Services.GetRequiredService<IEnumerable<EndpointDataSource>>()
+            .SelectMany(static dataSource => dataSource.Endpoints));
+        var metadata = endpoint.Metadata.GetMetadata<ForwardedRequestHeadersMetadata>();
+        Assert.NotNull(metadata);
+        Assert.Equal(["X-Trace-Id"], metadata.HeaderNames);
+    }
 }

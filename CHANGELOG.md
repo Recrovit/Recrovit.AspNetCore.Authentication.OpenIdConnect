@@ -15,6 +15,7 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
   - Added provider-specific `DownstreamApis` overrides, including base URL, relative path, scope replacement, header-list replacement, and `Disabled` support.
   - Added request and response header allowlists to downstream API definitions, plus `IncludeDefaultForwardedRequestHeaders`.
   - Added `MapDownstreamApiProxyEndpoints(Action<DownstreamProxyEndpointOptions> configure, string routePrefix = DefaultRoutePrefix)` with immutable per-API claim-header mappings through `ForwardFirstClaimHeader(...)` and `ForwardClaimValuesHeader(...)`.
+  - Added native endpoint-level request-header forwarding through `ForwardRequestHeaders(...)` for generic downstream proxy mappings and `WithForwardedRequestHeaders(...)` for custom proxy routes that use the built-in executor.
 
 - Token session-state and refresh coordination
   - Reworked token persistence around one encrypted, versioned session aggregate instead of separate session/API-token cache entries.
@@ -48,8 +49,8 @@ This file contains the release history for `Recrovit.AspNetCore.Authentication.O
 ### Other Changes
 
 - Documentation and tests
-  - Clarified README guidance for provider-specific downstream APIs, proxy request protection, token-cache HMAC secrets, Data Protection configuration, and multi-instance requirements.
-  - Added and updated regression coverage for Data Protection validation, downstream API overrides, proxy path/header/origin hardening, token-state persistence, refresh coordination, and cleanup behavior.
+  - Clarified README guidance for provider-specific downstream APIs, endpoint-level proxy request-header forwarding, proxy request protection, token-cache HMAC secrets, Data Protection configuration, and multi-instance requirements.
+  - Added and updated regression coverage for Data Protection validation, downstream API overrides, endpoint-level request-header forwarding, proxy path/header/origin hardening, token-state persistence, refresh coordination, and cleanup behavior.
   - Kept process-local session coordination as an internal package implementation detail.
 
 ### Breaking Changes
