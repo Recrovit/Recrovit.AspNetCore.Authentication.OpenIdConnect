@@ -19,6 +19,8 @@ internal sealed class OidcSessionCleanupService(
     /// Clears the local cookie-based session and removes any stored user tokens.
     /// </summary>
     /// <param name="httpContext">The current HTTP context.</param>
+    /// <param name="reason">The diagnostic reason for clearing the current session.</param>
+    /// <param name="sessionPrincipal">The principal whose local session should be cleared, or <see langword="null"/> to use <paramref name="httpContext"/> user.</param>
     /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task ClearSessionAsync(HttpContext httpContext, string reason = "unspecified", ClaimsPrincipal? sessionPrincipal = null)
     {
@@ -52,6 +54,8 @@ internal sealed class OidcSessionCleanupService(
     /// Clears the local session and writes an unauthorized response that signals reauthentication.
     /// </summary>
     /// <param name="httpContext">The current HTTP context.</param>
+    /// <param name="reason">The diagnostic reason for requiring reauthentication.</param>
+    /// <param name="sessionPrincipal">The principal whose local session should be cleared, or <see langword="null"/> to use <paramref name="httpContext"/> user.</param>
     /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task WriteUnauthorizedAsync(HttpContext httpContext, string reason = "reauth-required", ClaimsPrincipal? sessionPrincipal = null)
     {

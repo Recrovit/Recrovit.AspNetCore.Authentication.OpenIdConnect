@@ -21,6 +21,7 @@ internal sealed class ApiAwareAuthorizationMiddlewareResultHandler : IAuthorizat
     /// Initializes a new instance of the <see cref="ApiAwareAuthorizationMiddlewareResultHandler"/> class.
     /// </summary>
     /// <param name="proxyEndpointMatcher">The proxy endpoint matcher used to detect proxy requests.</param>
+    /// <param name="logger">The logger used to record redirect suppression decisions.</param>
     public ApiAwareAuthorizationMiddlewareResultHandler(
         ProxyEndpointMatcher proxyEndpointMatcher,
         ILogger<ApiAwareAuthorizationMiddlewareResultHandler> logger)
@@ -33,6 +34,7 @@ internal sealed class ApiAwareAuthorizationMiddlewareResultHandler : IAuthorizat
     /// </summary>
     /// <param name="fallbackHandler">The fallback handler used when redirect suppression is not required.</param>
     /// <param name="proxyEndpointMatcher">The proxy endpoint matcher used to detect proxy requests.</param>
+    /// <param name="logger">The logger used to record redirect suppression decisions.</param>
     internal ApiAwareAuthorizationMiddlewareResultHandler(
         IAuthorizationMiddlewareResultHandler fallbackHandler,
         ProxyEndpointMatcher proxyEndpointMatcher,
