@@ -35,6 +35,74 @@ public sealed class RecrovitOpenIdConnectHostExtensionsTests
     }
 
     [Fact]
+    public void IsRecrovitOpenIdConnectProductionReadinessEnforced_ReturnsFalse_InDevelopmentByDefault()
+    {
+        var builder = CreateBuilder(Environments.Development);
+
+        Assert.False(builder.IsRecrovitOpenIdConnectProductionReadinessEnforced());
+    }
+
+    [Fact]
+    public void IsRecrovitOpenIdConnectProductionReadinessEnforced_ReturnsTrue_InDevelopmentWhenOptedIn()
+    {
+        var builder = CreateBuilder(
+            Environments.Development,
+            new Dictionary<string, string?>
+            {
+                [$"{TestConfiguration.RootSectionName}:Infrastructure:RequireProductionReadinessInDevelopment"] = bool.TrueString
+            });
+
+        Assert.True(builder.IsRecrovitOpenIdConnectProductionReadinessEnforced());
+    }
+
+    [Fact]
+    public void IsRecrovitOpenIdConnectProductionReadinessEnforced_ReturnsFalse_InDevelopmentWhenDisabled()
+    {
+        var builder = CreateBuilder(
+            Environments.Development,
+            new Dictionary<string, string?>
+            {
+                [$"{TestConfiguration.RootSectionName}:Infrastructure:RequireProductionReadinessInDevelopment"] = bool.FalseString
+            });
+
+        Assert.False(builder.IsRecrovitOpenIdConnectProductionReadinessEnforced());
+    }
+
+    [Fact]
+    public void IsRecrovitOpenIdConnectProductionReadinessEnforced_ReturnsTrue_InProduction_WhenFlagIsFalse()
+    {
+        var builder = CreateBuilder(
+            Environments.Production,
+            new Dictionary<string, string?>
+            {
+                [$"{TestConfiguration.RootSectionName}:Infrastructure:RequireProductionReadinessInDevelopment"] = bool.FalseString
+            });
+
+        Assert.True(builder.IsRecrovitOpenIdConnectProductionReadinessEnforced());
+    }
+
+    [Fact]
+    public void IsRecrovitOpenIdConnectProductionReadinessEnforced_ReturnsTrue_InProduction_WhenFlagIsTrue()
+    {
+        var builder = CreateBuilder(
+            Environments.Production,
+            new Dictionary<string, string?>
+            {
+                [$"{TestConfiguration.RootSectionName}:Infrastructure:RequireProductionReadinessInDevelopment"] = bool.TrueString
+            });
+
+        Assert.True(builder.IsRecrovitOpenIdConnectProductionReadinessEnforced());
+    }
+
+    [Fact]
+    public void IsRecrovitOpenIdConnectProductionReadinessEnforced_ReturnsFalse_OutsideDevelopmentAndProduction()
+    {
+        var builder = CreateBuilder("Staging");
+
+        Assert.False(builder.IsRecrovitOpenIdConnectProductionReadinessEnforced());
+    }
+
+    [Fact]
     public async Task UseRecrovitOpenIdConnectForwardedHeaders_AppliesConfiguredForwardedHeaders()
     {
         await using var app = await CreateForwardedHeadersApplicationAsync(new HostSecurityOptions
@@ -109,6 +177,17 @@ public sealed class RecrovitOpenIdConnectHostExtensionsTests
 
         Assert.Equal(HttpStatusCode.MethodNotAllowed, mappedResponse.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, unmappedResponse.StatusCode);
+    }
+
+    private static WebApplicationBuilder CreateBuilder(string environmentName, Dictionary<string, string?>? overrides = null)
+    {
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            EnvironmentName = environmentName
+        });
+        builder.Configuration.AddInMemoryCollection(TestConfiguration.CreateBaseConfiguration(overrides));
+
+        return builder;
     }
 
     private static async Task<WebApplication> CreateForwardedHeadersApplicationAsync(HostSecurityOptions hostSecurityOptions)

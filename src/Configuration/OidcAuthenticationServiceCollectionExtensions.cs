@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
@@ -20,7 +21,6 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Diagnostics;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 using System.Security.Claims;
 using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 
@@ -40,6 +40,21 @@ public static class OidcAuthenticationServiceCollectionExtensions
         this IServiceCollection services,
         IConfiguration configuration,
         IWebHostEnvironment environment)
+        => services.AddOidcAuthenticationInfrastructure(configuration, environment, configureDataProtection: null);
+
+    /// <summary>
+    /// Registers the generic OIDC authentication infrastructure for an ASP.NET Core host.
+    /// </summary>
+    /// <param name="services">The service collection to configure.</param>
+    /// <param name="configuration">The application configuration used to bind authentication options.</param>
+    /// <param name="environment">The current hosting environment.</param>
+    /// <param name="configureDataProtection">Optional callback to extend the shared Data Protection configuration.</param>
+    /// <returns>The same service collection instance.</returns>
+    public static IServiceCollection AddOidcAuthenticationInfrastructure(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        IWebHostEnvironment environment,
+        Action<IDataProtectionBuilder>? configureDataProtection)
     {
         var hostSection = OpenIdConnectConfigurationResolver.GetHostSection(configuration);
         var tokenCacheSection = OpenIdConnectConfigurationResolver.GetTokenCacheSection(configuration);
@@ -47,7 +62,8 @@ public static class OidcAuthenticationServiceCollectionExtensions
         var activeProviderName = OpenIdConnectConfigurationResolver.GetActiveProviderName(configuration);
         var providerSection = OpenIdConnectConfigurationResolver.GetActiveProviderSection(configuration);
         var downstreamApisSection = OpenIdConnectConfigurationResolver.GetDownstreamApisSection(configuration);
-        var downstreamApiCatalog = DownstreamApiCatalog.Create(downstreamApisSection);
+        var providerDownstreamApisSection = OpenIdConnectConfigurationResolver.GetActiveProviderDownstreamApisSection(configuration);
+        var downstreamApiCatalog = DownstreamApiCatalog.Create(downstreamApisSection, providerDownstreamApisSection);
         var configuredProviderOptions = providerSection.Get<OidcProviderOptions>()
             ?? throw new InvalidOperationException("The OIDC configuration could not be loaded.");
         var scopeResolver = new OidcScopeResolver(configuredProviderOptions.Scopes, downstreamApiCatalog);
@@ -85,6 +101,9 @@ public static class OidcAuthenticationServiceCollectionExtensions
                     || options.ClientCertificate!.Source != OidcClientCertificateSource.WindowsStore
                     || OperatingSystem.IsWindows(),
                 $"{providerSection.Path}:ClientCertificate:Source 'WindowsStore' is only supported on Windows.")
+            .Validate(
+                options => options.TokenEndpointTimeout > TimeSpan.Zero,
+                $"{providerSection.Path}:TokenEndpointTimeout must be a positive time span.")
             .ValidateOnStart();
 
         services.AddOptions<TokenCacheOptions>()
@@ -118,6 +137,16 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 options => string.IsNullOrWhiteSpace(options.SessionValidationDownstreamApiName)
                     || downstreamApiCatalog.Apis.ContainsKey(options.SessionValidationDownstreamApiName),
                 $"{hostSection.Path}:SessionValidationDownstreamApiName must reference a configured entry in {downstreamApisSection.Path}.")
+            .Validate(
+                options => string.IsNullOrWhiteSpace(options.DownstreamProxyRequestProtection.CustomHeaderName)
+                    == string.IsNullOrWhiteSpace(options.DownstreamProxyRequestProtection.CustomHeaderValue),
+                $"{hostSection.Path}:DownstreamProxyRequestProtection requires both CustomHeaderName and CustomHeaderValue when either is configured.")
+            .Validate(
+                options => options.DownstreamProxyRequestProtection.AllowedHttpOrigins.All(IsValidOrigin),
+                $"{hostSection.Path}:DownstreamProxyRequestProtection:AllowedHttpOrigins must contain only absolute HTTP or HTTPS origins.")
+            .Validate(
+                options => options.DownstreamProxyRequestProtection.AllowedWebSocketOrigins.All(IsValidOrigin),
+                $"{hostSection.Path}:DownstreamProxyRequestProtection:AllowedWebSocketOrigins must contain only absolute HTTP or HTTPS origins.")
             .ValidateOnStart();
 
         services.AddOptions<HostSecurityOptions>()
@@ -132,22 +161,46 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
         services.AddSingleton(downstreamApiCatalog);
         services.AddSingleton(scopeResolver);
-        services.AddSingleton<IUserRefreshLockProvider, UserRefreshLockProvider>();
+        services.TryAddSingleton<ILocalOidcSessionCoordinator, LocalOidcSessionCoordinator>();
+        services.AddSingleton<IOidcSessionRefreshLockProvider>(serviceProvider => new UserRefreshLockProvider(
+            serviceProvider.GetRequiredService<IOptions<ActiveOidcProviderOptions>>()));
         services.AddSingleton<ICertificateStoreReader, WindowsCertificateStoreReader>();
         services.AddSingleton<IOidcClientCertificateLoader, OidcClientCertificateLoader>();
         services.AddSingleton<IOidcClientAssertionService, OidcPrivateKeyJwtClientAssertionService>();
 
         services.AddDistributedMemoryCache();
         services.AddHttpContextAccessor();
-        services.AddHttpClient();
-        services.AddHttpClient<IDownstreamHttpProxyClient, DownstreamHttpProxyClient>();
+        services.AddHttpClient(
+                OidcHttpClientNames.TokenEndpoint,
+                static (serviceProvider, client) =>
+                {
+                    var options = serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>().Value;
+                    client.Timeout = options.TokenEndpointTimeout;
+                })
+            .ConfigurePrimaryHttpMessageHandler(static () => new HttpClientHandler
+            {
+                AllowAutoRedirect = false,
+                UseCookies = false
+            });
+        services.AddAntiforgery();
+        services.AddHttpClient<IDownstreamHttpProxyClient, DownstreamHttpProxyClient>()
+            .ConfigurePrimaryHttpMessageHandler(static () => new HttpClientHandler
+            {
+                AllowAutoRedirect = false,
+                UseCookies = false
+            });
         services.AddSingleton<ProxyEndpointMatcher>();
+        services.AddSingleton<IDownstreamProxyRequestProtectionEvaluator, DownstreamProxyRequestProtectionEvaluator>();
         services.AddScoped<IDownstreamTransportProxyClient, DownstreamTransportProxyClient>();
 
-        services.AddScoped<IDownstreamUserTokenStore, DistributedDownstreamUserTokenStore>();
+        services.AddScoped<DistributedDownstreamUserTokenStore>();
+        services.AddScoped<IDownstreamUserTokenStore>(serviceProvider => serviceProvider.GetRequiredService<DistributedDownstreamUserTokenStore>());
+        services.AddScoped<IOidcSessionStateStore>(serviceProvider => serviceProvider.GetRequiredService<DistributedDownstreamUserTokenStore>());
         services.AddScoped<IDownstreamUserTokenProvider>(serviceProvider => new OidcDownstreamUserTokenProvider(
             serviceProvider.GetRequiredService<IDownstreamUserTokenStore>(),
-            serviceProvider.GetRequiredService<IUserRefreshLockProvider>(),
+            serviceProvider.GetRequiredService<IOidcSessionStateStore>(),
+            serviceProvider.GetRequiredService<IOidcSessionRefreshLockProvider>(),
+            serviceProvider.GetRequiredService<ILocalOidcSessionCoordinator>(),
             serviceProvider.GetRequiredService<DownstreamApiCatalog>(),
             serviceProvider.GetRequiredService<OidcScopeResolver>(),
             serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>(),
@@ -157,7 +210,8 @@ public static class OidcAuthenticationServiceCollectionExtensions
             serviceProvider.GetRequiredService<IHttpClientFactory>(),
             serviceProvider.GetRequiredService<IWebHostEnvironment>(),
             serviceProvider.GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>(),
-            serviceProvider.GetRequiredService<IOidcClientAssertionService>()));
+            serviceProvider.GetRequiredService<IOidcClientAssertionService>(),
+            serviceProvider.GetRequiredService<TimeProvider>()));
         services.AddScoped<OidcSessionCleanupService>();
 
         services.AddAuthentication(options =>
@@ -315,6 +369,8 @@ public static class OidcAuthenticationServiceCollectionExtensions
                     OnTicketReceived = async context =>
                     {
                         var tokenStore = context.HttpContext.RequestServices.GetRequiredService<IDownstreamUserTokenStore>();
+                        var localSessionCoordinator = context.HttpContext.RequestServices
+                            .GetRequiredService<ILocalOidcSessionCoordinator>();
                         var ticketLogger = context.HttpContext.RequestServices
                             .GetRequiredService<ILoggerFactory>()
                             .CreateLogger("Recrovit.AspNetCore.Authentication.OpenIdConnect.Ticket");
@@ -334,9 +390,14 @@ public static class OidcAuthenticationServiceCollectionExtensions
                         var timeProvider = context.HttpContext.RequestServices.GetRequiredService<TimeProvider>();
                         EnsureLocalSessionIdClaim(principal);
                         OidcSessionTimeoutMetadata.StampSessionLifetime(principal, hostOptions, timeProvider);
-                        await tokenStore.StoreSessionTokenSetAsync(
+                        await using var localSessionLock = await localSessionCoordinator.AcquireAsync(
                             principal,
-                            StoredOidcSessionTokenSet.FromAuthenticationProperties(authenticationProperties),
+                            context.HttpContext.RequestAborted);
+                        await LocalOidcSessionStoreOperations.StoreSessionTokenSetAsync(
+                            tokenStore,
+                            principal,
+                            StoredOidcSessionTokenSet.FromAuthenticationProperties(authenticationProperties, timeProvider),
+                            localSessionLock,
                             context.HttpContext.RequestAborted);
                         OidcInfrastructureLog.SessionTokenPersisted(ticketLogger, activeProviderName);
 
@@ -351,11 +412,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
         services.AddSingleton<IAuthorizationMiddlewareResultHandler, ApiAwareAuthorizationMiddlewareResultHandler>();
 
         var hostSecurityOptions = infrastructureSection.Get<HostSecurityOptions>();
-        var dataProtectionBuilder = services.AddDataProtection();
-        if (!string.IsNullOrWhiteSpace(hostSecurityOptions?.DataProtectionKeysPath))
-        {
-            dataProtectionBuilder.PersistKeysToFileSystem(new DirectoryInfo(hostSecurityOptions.DataProtectionKeysPath));
-        }
+        ConfigureDataProtection(services, hostSecurityOptions, configureDataProtection);
 
         services.AddSingleton<IStartupFilter>(_ => new ConfigurationStartupFilter(environment));
 
@@ -389,6 +446,107 @@ public static class OidcAuthenticationServiceCollectionExtensions
             !path.StartsWith("//", StringComparison.Ordinal);
     }
 
+    private static bool IsValidOrigin(string? origin)
+        => DownstreamProxyOriginHelper.IsValidConfiguredOrigin(origin);
+
+    private static void ConfigureDataProtection(
+        IServiceCollection services,
+        HostSecurityOptions? hostSecurityOptions,
+        Action<IDataProtectionBuilder>? configureDataProtection)
+    {
+        var dataProtectionBuilder = services.AddDataProtection();
+        if (!string.IsNullOrWhiteSpace(hostSecurityOptions?.DataProtectionKeysPath))
+        {
+            dataProtectionBuilder.PersistKeysToFileSystem(new DirectoryInfo(hostSecurityOptions.DataProtectionKeysPath));
+        }
+
+        configureDataProtection?.Invoke(dataProtectionBuilder);
+    }
+
+    private static DataProtectionConfigurationState GetDataProtectionConfigurationState(IServiceProvider services)
+    {
+        var dataProtectionOptions = services.GetRequiredService<IOptions<DataProtectionOptions>>().Value;
+        var keyManagementOptions = services.GetRequiredService<IOptions<KeyManagementOptions>>().Value;
+
+        return new DataProtectionConfigurationState(
+            HasExplicitApplicationIsolation: !string.IsNullOrWhiteSpace(dataProtectionOptions.ApplicationDiscriminator),
+            HasExplicitRepository: keyManagementOptions.XmlRepository is not null,
+            HasKeyRingEncryption: keyManagementOptions.XmlEncryptor is not null);
+    }
+
+    private static void ValidateDataProtectionConfiguration(
+        IServiceProvider services,
+        IWebHostEnvironment environment,
+        ILogger logger,
+        HostSecurityOptions hostSecurityOptions)
+    {
+        var state = GetDataProtectionConfigurationState(services);
+        var enforceProductionReadiness = ShouldEnforceProductionReadiness(environment, hostSecurityOptions);
+
+        if (!enforceProductionReadiness)
+        {
+            if (hostSecurityOptions.DataProtectionSecurityProfile == DataProtectionSecurityProfile.Hardened)
+            {
+                LogHardenedDataProtectionWarnings(logger, state);
+            }
+
+            return;
+        }
+
+        if (!state.HasExplicitRepository)
+        {
+            var missingRepositoryMessage =
+                "Production-readiness validation requires an explicit shared Data Protection key repository. Configure Recrovit:OpenIdConnect:Infrastructure:DataProtectionKeysPath or configure the host Data Protection key repository explicitly.";
+            OidcInfrastructureLog.StartupValidationFailed(logger, "data-protection-repository", missingRepositoryMessage);
+            throw new InvalidOperationException(missingRepositoryMessage);
+        }
+
+        if (hostSecurityOptions.DataProtectionSecurityProfile == DataProtectionSecurityProfile.Hardened)
+        {
+            if (!state.HasExplicitApplicationIsolation)
+            {
+                var missingIsolationMessage =
+                    "Production-readiness validation with Hardened Data Protection requires explicit application isolation. Configure SetApplicationName(...) for the host application.";
+                OidcInfrastructureLog.StartupValidationFailed(logger, "data-protection-application-isolation", missingIsolationMessage);
+                throw new InvalidOperationException(missingIsolationMessage);
+            }
+
+            if (!state.HasKeyRingEncryption)
+            {
+                var missingEncryptionMessage =
+                    "Production-readiness validation with Hardened Data Protection requires key-ring encryption when an explicit key repository is configured. Configure a certificate, KMS, DPAPI, or another IXmlEncryptor implementation.";
+                OidcInfrastructureLog.StartupValidationFailed(logger, "data-protection-key-ring-encryption", missingEncryptionMessage);
+                throw new InvalidOperationException(missingEncryptionMessage);
+            }
+
+            return;
+        }
+
+        if (!state.HasKeyRingEncryption)
+        {
+            OidcInfrastructureLog.DataProtectionConfigurationWarning(
+                logger,
+                "The Data Protection key ring is persisted to an explicit location, but no key-ring encryption configuration was detected. This configuration is supported for backward compatibility. Consider protecting the key ring with a certificate, DPAPI, KMS, or another IXmlEncryptor implementation.");
+        }
+    }
+
+    private static void LogHardenedDataProtectionWarnings(ILogger logger, DataProtectionConfigurationState state)
+    {
+        if (!state.HasExplicitApplicationIsolation)
+        {
+            OidcInfrastructureLog.DataProtectionConfigurationWarning(
+                logger,
+                "Hardened Data Protection requires explicit application isolation. Configure SetApplicationName(...) for the host application.");
+        }
+
+        if (state.HasExplicitRepository && !state.HasKeyRingEncryption)
+        {
+            OidcInfrastructureLog.DataProtectionConfigurationWarning(
+                logger,
+                "Hardened Data Protection requires key-ring encryption when an explicit key repository is configured. Configure a certificate, KMS, DPAPI, or another IXmlEncryptor implementation.");
+        }
+    }
+
     private static void EnsureLocalSessionIdClaim(ClaimsPrincipal principal)
     {
         ArgumentNullException.ThrowIfNull(principal);
@@ -415,9 +573,9 @@ public static class OidcAuthenticationServiceCollectionExtensions
         {
             return app =>
             {
-                ValidateProductionReadiness(app.ApplicationServices, environment);
-                next(app);
-            };
+            ValidateProductionReadiness(app.ApplicationServices, environment);
+            next(app);
+        };
         }
 
         private static void ValidateProductionReadiness(IServiceProvider services, IWebHostEnvironment environment)
@@ -447,7 +605,12 @@ public static class OidcAuthenticationServiceCollectionExtensions
                     $"{OpenIdConnectConfigurationResolver.RootSectionName}:Providers:<provider>:Scopes and downstream API scopes must define at least one non-empty effective scope.");
             }
 
-            if (!environment.IsProduction())
+            ValidateDataProtectionConfiguration(services, environment, logger, hostSecurityOptions);
+            ValidateTokenRefreshCoordinationConfiguration(services, logger);
+            ValidateTokenCacheSecretConfiguration(services, environment, logger);
+            var enforceProductionReadiness = ShouldEnforceProductionReadiness(environment, hostSecurityOptions);
+
+            if (!enforceProductionReadiness)
             {
                 return;
             }
@@ -456,7 +619,7 @@ public static class OidcAuthenticationServiceCollectionExtensions
 
             var authorityHttpsError = OidcEndpointHttpsValidator.GetProductionRequirementError(
                 oidcOptions.Authority,
-                environment,
+                enforceProductionReadiness,
                 $"{OpenIdConnectConfigurationResolver.RootSectionName}:Providers:<provider>:Authority");
             if (authorityHttpsError is not null)
             {
@@ -464,7 +627,20 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 throw new InvalidOperationException(authorityHttpsError);
             }
 
-            var forwardedHeadersError = ForwardedHeadersConfiguration.GetProductionRequirementError(hostSecurityOptions, environment);
+            foreach (var (apiName, definition) in downstreamApiCatalog.Apis.OrderBy(static api => api.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                if (OidcEndpointHttpsValidator.IsAbsoluteHttpsUri(definition.BaseUrl))
+                {
+                    continue;
+                }
+
+                var downstreamHttpsError =
+                    $"Production-readiness validation requires {OpenIdConnectConfigurationResolver.RootSectionName}:DownstreamApis:{apiName}:BaseUrl to be an absolute HTTPS URI.";
+                OidcInfrastructureLog.StartupValidationFailed(logger, "downstream-api-https", downstreamHttpsError);
+                throw new InvalidOperationException(downstreamHttpsError);
+            }
+
+            var forwardedHeadersError = ForwardedHeadersConfiguration.GetProductionRequirementError(hostSecurityOptions, enforceProductionReadiness);
             if (forwardedHeadersError is not null)
             {
                 OidcInfrastructureLog.StartupValidationFailed(logger, "forwarded-headers", forwardedHeadersError);
@@ -477,20 +653,62 @@ public static class OidcAuthenticationServiceCollectionExtensions
                 OidcInfrastructureLog.StartupValidationFailed(
                     logger,
                     "distributed-cache",
-                    "Production requires a shared distributed cache for user token storage.");
+                    "Production-readiness validation requires a shared distributed cache for user token storage.");
                 throw new InvalidOperationException(
-                    "Production requires a shared distributed cache for user token storage. Replace AddDistributedMemoryCache with a shared implementation.");
-            }
-
-            if (string.IsNullOrWhiteSpace(hostSecurityOptions.DataProtectionKeysPath))
-            {
-                OidcInfrastructureLog.StartupValidationFailed(
-                    logger,
-                    "data-protection-keys",
-                    $"Production requires {OpenIdConnectConfigurationResolver.RootSectionName}:Infrastructure:DataProtectionKeysPath for shared Data Protection keys.");
-                throw new InvalidOperationException(
-                    $"Production requires {OpenIdConnectConfigurationResolver.RootSectionName}:Infrastructure:DataProtectionKeysPath for shared Data Protection keys.");
+                    "Production-readiness validation requires a shared distributed cache for user token storage. Replace AddDistributedMemoryCache with a shared implementation.");
             }
         }
     }
+
+    private static bool ShouldEnforceProductionReadiness(IHostEnvironment environment, HostSecurityOptions hostSecurityOptions)
+        => OidcProductionReadinessEvaluator.IsEnforced(environment, hostSecurityOptions);
+
+    private static void ValidateTokenCacheSecretConfiguration(IServiceProvider services, IWebHostEnvironment environment, ILogger logger)
+    {
+        if (!environment.IsProduction())
+        {
+            return;
+        }
+
+        var tokenCacheOptions = services.GetRequiredService<IOptions<TokenCacheOptions>>().Value;
+        if (string.Equals(
+            tokenCacheOptions.CacheKeyHmacSecret,
+            TokenCacheOptions.DevelopmentOnlySharedHmacSecret,
+            StringComparison.Ordinal))
+        {
+            OidcInfrastructureLog.DefaultTokenCacheHmacSecretWarning(logger);
+        }
+    }
+
+    private static void ValidateTokenRefreshCoordinationConfiguration(IServiceProvider services, ILogger logger)
+    {
+        var tokenCacheOptions = services.GetRequiredService<IOptions<TokenCacheOptions>>().Value;
+        if (tokenCacheOptions.DeploymentMode != TokenCacheDeploymentMode.MultiInstance)
+        {
+            return;
+        }
+
+        var refreshLockProvider = services.GetRequiredService<IOidcSessionRefreshLockProvider>();
+        if (refreshLockProvider is UserRefreshLockProvider)
+        {
+            const string refreshLockMessage =
+                "TokenCache:DeploymentMode is set to MultiInstance, but the default in-process refresh lock provider is still registered. Replace IOidcSessionRefreshLockProvider with a cross-node implementation before production use.";
+            OidcInfrastructureLog.StartupValidationFailed(logger, "multi-instance-refresh-lock", refreshLockMessage);
+            throw new InvalidOperationException(refreshLockMessage);
+        }
+
+        var sessionStateStore = services.GetRequiredService<IOidcSessionStateStore>();
+        if (sessionStateStore is DistributedDownstreamUserTokenStore)
+        {
+            const string sessionStateStoreMessage =
+                "TokenCache:DeploymentMode is set to MultiInstance, but the default distributed token store is still registered. Replace IOidcSessionStateStore with an implementation that provides atomic cross-node compare-and-swap semantics before production use.";
+            OidcInfrastructureLog.StartupValidationFailed(logger, "multi-instance-session-state-store", sessionStateStoreMessage);
+            throw new InvalidOperationException(sessionStateStoreMessage);
+        }
+    }
+
+    private sealed record DataProtectionConfigurationState(
+        bool HasExplicitApplicationIsolation,
+        bool HasExplicitRepository,
+        bool HasKeyRingEncryption);
 }

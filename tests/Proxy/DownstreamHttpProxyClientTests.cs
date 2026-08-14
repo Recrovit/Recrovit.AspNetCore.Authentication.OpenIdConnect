@@ -1,5 +1,6 @@
 using System.Net;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Primitives;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
@@ -29,6 +30,18 @@ public sealed class DownstreamHttpProxyClientTests
         Assert.Equal("Bearer", captureHandler.LastRequest!.Headers.Authorization!.Scheme);
         Assert.Equal("access-token", captureHandler.LastRequest.Headers.Authorization.Parameter);
         Assert.Equal("https://api.example.com/gateway/session/check?id=5", captureHandler.LastRequest.RequestUri!.ToString());
+
+        using var emptyPathResponse = await client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            string.Empty,
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None);
+
+        Assert.Equal(HttpStatusCode.OK, emptyPathResponse.StatusCode);
+        Assert.Equal("https://api.example.com/gateway", captureHandler.LastRequest.RequestUri!.ToString());
     }
 
     [Fact]
@@ -54,11 +67,11 @@ public sealed class DownstreamHttpProxyClientTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Null(captureHandler.LastRequest!.Headers.Authorization);
         Assert.True(captureHandler.LastRequest.Headers.Contains("Accept-Language"));
-        Assert.False(captureHandler.LastRequest.Headers.Contains("Cookie"));
+        Assert.True(captureHandler.LastRequest.Headers.Contains("Cookie"));
     }
 
     [Fact]
-    public async Task SendAsync_ForwardsOnlyAllowlistedHeaders()
+    public async Task SendAsync_ForwardsProvidedHeaders_WhenCallerSuppliesPreparedSet()
     {
         var captureHandler = new CaptureRequestHandler();
         using var httpClient = new HttpClient(captureHandler);
@@ -93,15 +106,15 @@ public sealed class DownstreamHttpProxyClientTests
         Assert.True(request.Headers.Contains("Accept-Language"));
         Assert.True(request.Headers.Contains("If-None-Match"));
         Assert.True(request.Headers.Contains("RgF-Trace-Id"));
-
-        Assert.Null(request.Headers.Authorization);
-        Assert.False(request.Headers.Contains("Cookie"));
-        Assert.False(request.Headers.Contains("Connection"));
-        Assert.False(request.Headers.Contains("X-Forwarded-For"));
-        Assert.Null(request.Headers.Host);
+        Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+        Assert.Equal("should-not-forward", request.Headers.Authorization?.Parameter);
+        Assert.True(request.Headers.Contains("Cookie"));
+        Assert.True(request.Headers.Contains("Connection"));
+        Assert.True(request.Headers.Contains("X-Forwarded-For"));
+        Assert.Equal("malicious.example", request.Headers.Host);
 
         Assert.Equal(
-            ["Accept", "Accept-Language", "If-None-Match", "RgF-Trace-Id"],
+            ["Accept", "Accept-Language", "Authorization", "Connection", "Cookie", "Host", "If-None-Match", "RgF-Trace-Id", "X-Forwarded-For"],
             forwardedInputHeaders.OrderBy(static header => header, StringComparer.OrdinalIgnoreCase));
     }
 
@@ -153,5 +166,198 @@ public sealed class DownstreamHttpProxyClientTests
         var error = Assert.Single(logger.Entries, static entry => entry.Level == LogLevel.Error);
         Assert.Contains("failed", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret-code", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SendAsync_RejectsAbsoluteAndAuthorityLikeProxyPaths()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(httpClient, new StubDownstreamUserTokenProvider());
+
+        var absoluteException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/https://attacker.example/collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+        Assert.Contains("absolute URI", absoluteException.Message, StringComparison.OrdinalIgnoreCase);
+
+        var schemeRelativeException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "//attacker.example/collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+        Assert.Contains("authority-like", schemeRelativeException.Message, StringComparison.OrdinalIgnoreCase);
+
+        var encodedSeparatorException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/%2F%2Fattacker.example/collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+        Assert.Contains("authority-like", encodedSeparatorException.Message, StringComparison.OrdinalIgnoreCase);
+
+        var backslashException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "\\\\attacker.example\\collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+        Assert.Contains("authority-like", backslashException.Message, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Null(captureHandler.LastRequest);
+    }
+
+    [Fact]
+    public async Task SendAsync_RejectsProxyPathThatChangesPort()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(
+            httpClient,
+            new StubDownstreamUserTokenProvider(),
+            NullLogger<Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy.DownstreamHttpProxyClient>.Instance,
+            TestFactories.CreateDownstreamApiCatalog(relativePath: string.Empty, sessionValidationBaseUrl: "https://api.example.com:443"));
+
+        var portSwitchException = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/https://api.example.com:444/collect",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+
+        Assert.True(
+            portSwitchException.Message.Contains("absolute URI", StringComparison.OrdinalIgnoreCase) ||
+            portSwitchException.Message.Contains("configured downstream origin", StringComparison.OrdinalIgnoreCase));
+        Assert.Null(captureHandler.LastRequest);
+    }
+
+    [Theory]
+    [MemberData(nameof(GetInvalidProxyPaths))]
+    public async Task SendAsync_RejectsInvalidProxyPaths(string pathAndQuery)
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(httpClient, new StubDownstreamUserTokenProvider());
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            pathAndQuery,
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+
+        Assert.Contains("path", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(captureHandler.LastRequest);
+    }
+
+    [Fact]
+    public async Task SendAsync_RejectsProxyPathThatRequiresExcessiveDecoding()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(httpClient, new StubDownstreamUserTokenProvider());
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            $"/{EncodeRepeatedly("..", 7)}/admin",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+
+        Assert.Contains("path", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(captureHandler.LastRequest);
+    }
+
+    [Fact]
+    public async Task SendAsync_RejectsResolvedPathOutsideConfiguredRelativeRoot()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(
+            httpClient,
+            new StubDownstreamUserTokenProvider(),
+            NullLogger<Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy.DownstreamHttpProxyClient>.Instance,
+            TestFactories.CreateDownstreamApiCatalog(relativePath: "gateway/api"));
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/../../admin",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None));
+
+        Assert.Contains("path", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(captureHandler.LastRequest);
+    }
+
+    [Fact]
+    public async Task SendAsync_AllowsResolvedPathWithinConfiguredBasePath()
+    {
+        var captureHandler = new CaptureRequestHandler();
+        using var httpClient = new HttpClient(captureHandler);
+        var client = TestFactories.CreateHttpProxyClient(
+            httpClient,
+            new StubDownstreamUserTokenProvider(),
+            NullLogger<Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy.DownstreamHttpProxyClient>.Instance,
+            TestFactories.CreateDownstreamApiCatalog(relativePath: string.Empty, sessionValidationBaseUrl: "https://api.example.com/gateway"));
+
+        using var response = await client.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/session/check?id=5",
+            TestUsers.CreateAuthenticatedUser(),
+            content: null,
+            headers: [],
+            CancellationToken.None);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("https://api.example.com/gateway/session/check?id=5", captureHandler.LastRequest!.RequestUri!.ToString());
+    }
+
+    public static IEnumerable<object[]> GetInvalidProxyPaths()
+    {
+        yield return ["/../../admin"];
+        yield return ["/./health"];
+        yield return ["/%2e%2e/admin"];
+        yield return ["/%2e./admin"];
+        yield return ["/.%2e/admin"];
+        yield return [$"/{EncodeRepeatedly("..", 3)}/admin"];
+        yield return [$"/{EncodeRepeatedly("..", 4)}/admin"];
+        yield return [$"/..{EncodeRepeatedly("/", 2)}admin"];
+        yield return [$"/..{EncodeRepeatedly("\\", 2)}admin"];
+        yield return [$"/{EncodeRepeatedly("../..\\admin", 1)}"];
+        yield return ["/%ZZ/admin"];
+        yield return [$"/{EncodeRepeatedly("https://attacker.example/collect", 1)}"];
+        yield return [$"/{EncodeRepeatedly("//attacker.example/collect", 2)}"];
+    }
+
+    private static string EncodeRepeatedly(string value, int times)
+    {
+        var encodedValue = value;
+        for (var i = 0; i < times; i++)
+        {
+            encodedValue = Uri.EscapeDataString(encodedValue).ToLowerInvariant();
+        }
+
+        return encodedValue;
     }
 }

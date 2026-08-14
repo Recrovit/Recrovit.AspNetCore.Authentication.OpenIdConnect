@@ -1,4 +1,8 @@
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 using System.Net.Http.Headers;
 using System.Security.Claims;
 
@@ -21,6 +25,7 @@ public static class DownstreamProxyEndpointExecutor
             => ProxyHttpAsync(
             context,
             proxyClient,
+            context.RequestServices.GetRequiredService<DownstreamApiCatalog>(),
             downstreamApiName,
             $"{context.Request.Path}{context.Request.QueryString}",
             user,
@@ -32,11 +37,32 @@ public static class DownstreamProxyEndpointExecutor
     public static async Task ProxyHttpAsync(
         HttpContext context,
         IDownstreamHttpProxyClient proxyClient,
+        DownstreamApiCatalog downstreamApiCatalog,
         string downstreamApiName,
         string pathAndQuery,
         ClaimsPrincipal? user,
         CancellationToken cancellationToken)
     {
+        var downstreamApi = downstreamApiCatalog.GetRequired(downstreamApiName);
+        var logger = context.RequestServices
+            .GetRequiredService<ILoggerFactory>()
+            .CreateLogger(typeof(DownstreamProxyEndpointExecutor).FullName!);
+        var endpoint = context.GetEndpoint();
+        var endpointMetadata = endpoint?.Metadata.GetMetadata<DownstreamProxyEndpointMetadata>();
+        var apiMetadata = endpointMetadata?.GetApiMetadata(downstreamApiName) ?? DownstreamProxyEndpointApiMetadata.Empty;
+        var directForwardedRequestHeaders = endpoint?.Metadata
+            .GetOrderedMetadata<ForwardedRequestHeadersMetadata>()
+            .SelectMany(static metadata => metadata.HeaderNames)
+            .ToArray()
+            ?? [];
+        var forwardedHeaders = DownstreamProxyHeaderPolicy.CreateForwardedRequestHeaders(
+            downstreamApi,
+            context.Request.Headers,
+            user,
+            apiMetadata.ForwardedRequestHeaders.Concat(directForwardedRequestHeaders).ToArray(),
+            apiMetadata.ClaimHeaderMappings,
+            logger);
+
         using var content = CreateContent(context.Request);
         using var response = await proxyClient.SendAsync(
             downstreamApiName,
@@ -44,15 +70,28 @@ public static class DownstreamProxyEndpointExecutor
             pathAndQuery,
             user,
             content,
-            context.Request.Headers,
+            forwardedHeaders,
             cancellationToken);
 
-        await WriteResponseAsync(context, response, cancellationToken);
+        await WriteResponseAsync(
+            context,
+            response,
+            downstreamApi,
+            downstreamApiName,
+            endpointMetadata?.RoutePrefix ?? DownstreamApiProxyEndpointRouteBuilderExtensions.DefaultRoutePrefix,
+            logger,
+            cancellationToken);
     }
 
     private static HttpContent? CreateContent(HttpRequest request)
     {
-        if (!CanHaveBody(request.Method) || request.ContentLength is null or 0)
+        if (!CanHaveBody(request.Method))
+        {
+            return null;
+        }
+
+        var bodyDetection = request.HttpContext.Features.Get<IHttpRequestBodyDetectionFeature>();
+        if (bodyDetection?.CanHaveBody != true)
         {
             return null;
         }
@@ -63,6 +102,9 @@ public static class DownstreamProxyEndpointExecutor
             content.Headers.ContentType = MediaTypeHeaderValue.Parse(request.ContentType);
         }
 
+        CopyContentHeaderIfPresent(request.Headers, content.Headers, "Content-Encoding");
+        CopyContentHeaderIfPresent(request.Headers, content.Headers, "Content-Language");
+
         return content;
     }
 
@@ -72,31 +114,31 @@ public static class DownstreamProxyEndpointExecutor
             || HttpMethods.IsPatch(method)
             || HttpMethods.IsDelete(method);
 
-    private static async Task WriteResponseAsync(HttpContext context, HttpResponseMessage response, CancellationToken cancellationToken)
+    private static void CopyContentHeaderIfPresent(
+        IHeaderDictionary requestHeaders,
+        HttpContentHeaders contentHeaders,
+        string headerName)
+    {
+        if (!requestHeaders.TryGetValue(headerName, out var values) || values.Count == 0)
+        {
+            return;
+        }
+
+        contentHeaders.TryAddWithoutValidation(headerName, values.ToArray());
+    }
+
+    private static async Task WriteResponseAsync(
+        HttpContext context,
+        HttpResponseMessage response,
+        DownstreamApiDefinition downstreamApi,
+        string downstreamApiName,
+        string routePrefix,
+        ILogger logger,
+        CancellationToken cancellationToken)
     {
         context.Response.StatusCode = (int)response.StatusCode;
-
-        foreach (var header in response.Headers)
-        {
-            if (ShouldCopyHeader(header.Key))
-            {
-                context.Response.Headers[header.Key] = header.Value.ToArray();
-            }
-        }
-
-        foreach (var header in response.Content.Headers)
-        {
-            if (ShouldCopyHeader(header.Key))
-            {
-                context.Response.Headers[header.Key] = header.Value.ToArray();
-            }
-        }
-
-        context.Response.Headers.Remove("transfer-encoding");
+        DownstreamProxyHeaderPolicy.CopyResponseHeaders(context, response, downstreamApi, downstreamApiName, routePrefix, logger);
 
         await response.Content.CopyToAsync(context.Response.Body, cancellationToken);
     }
-
-    private static bool ShouldCopyHeader(string headerName) =>
-        !headerName.Equals("transfer-encoding", StringComparison.OrdinalIgnoreCase);
 }

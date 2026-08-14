@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -6,9 +7,12 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
@@ -42,6 +46,27 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesSessionValidationDownstreamApiName_WhenProviderDisablesApi()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Host:SessionValidationDownstreamApiName"] = "SessionValidationApi",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = "https://api.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:SessionValidationApi:Disabled"] = "true"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
+
+        Assert.Contains("SessionValidationDownstreamApiName", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_BindsRemoteFailureRedirectPath()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
@@ -59,6 +84,100 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesStandardDataProtectionSecurityProfileByDefault()
+    {
+        var configuration = TestConfiguration.Build();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<HostSecurityOptions>>().Value;
+
+        Assert.Equal(DataProtectionSecurityProfile.Standard, options.DataProtectionSecurityProfile);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_DoesNotRequireProductionReadinessInDevelopmentByDefault()
+    {
+        var configuration = TestConfiguration.Build();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<HostSecurityOptions>>().Value;
+
+        Assert.False(options.RequireProductionReadinessInDevelopment);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ConfiguresDataProtectionCallback()
+    {
+        var configuration = TestConfiguration.Build();
+        var callbackRuns = 0;
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment(),
+            dataProtection =>
+            {
+                callbackRuns++;
+                dataProtection.SetApplicationName("Recrovit.Tests");
+                dataProtection.PersistKeysToFileSystem(new DirectoryInfo("/callback-keys"));
+                dataProtection.ProtectKeysWithCertificate(certificate.Certificate);
+            });
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var dataProtectionOptions = serviceProvider.GetRequiredService<IOptions<DataProtectionOptions>>().Value;
+        var keyManagementOptions = serviceProvider.GetRequiredService<IOptions<KeyManagementOptions>>().Value;
+
+        Assert.Equal(1, callbackRuns);
+        Assert.Equal("Recrovit.Tests", dataProtectionOptions.ApplicationDiscriminator);
+        Assert.NotNull(keyManagementOptions.XmlRepository);
+        Assert.NotNull(keyManagementOptions.XmlEncryptor);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsCallbackException()
+    {
+        var configuration = TestConfiguration.Build();
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            services.AddOidcAuthenticationInfrastructure(
+                configuration,
+                new FakeWebHostEnvironment(),
+                _ => throw new InvalidOperationException("callback failed")));
+
+        Assert.Equal("callback failed", ex.Message);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_PreservesHostConfiguredDataProtection()
+    {
+        var configuration = TestConfiguration.Build();
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var services = new ServiceCollection();
+        services.AddDataProtection()
+            .SetApplicationName("Host.Configured")
+            .PersistKeysToFileSystem(new DirectoryInfo("/host-keys"))
+            .ProtectKeysWithCertificate(certificate.Certificate);
+
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var dataProtectionOptions = serviceProvider.GetRequiredService<IOptions<DataProtectionOptions>>().Value;
+        var keyManagementOptions = serviceProvider.GetRequiredService<IOptions<KeyManagementOptions>>().Value;
+
+        Assert.Equal("Host.Configured", dataProtectionOptions.ApplicationDiscriminator);
+        Assert.NotNull(keyManagementOptions.XmlRepository);
+        Assert.NotNull(keyManagementOptions.XmlEncryptor);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_UsesDefaultRemoteFailureRedirectPath()
     {
         var configuration = TestConfiguration.Build();
@@ -70,6 +189,24 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         var options = serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value;
 
         Assert.Equal("/", options.RemoteFailureRedirectPath);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesDefaultDownstreamProxyRequestProtection()
+    {
+        var configuration = TestConfiguration.Build();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value;
+
+        Assert.Equal(ProxyRequestProtectionMode.FetchMetadataFirst, options.DownstreamProxyRequestProtection.Mode);
+        Assert.False(options.DownstreamProxyRequestProtection.AllowSameSite);
+        Assert.Empty(options.DownstreamProxyRequestProtection.AllowedHttpOrigins);
+        Assert.Empty(options.DownstreamProxyRequestProtection.AllowedWebSocketOrigins);
+        Assert.False(options.DownstreamProxyRequestProtection.AllowMissingWebSocketOrigin);
     }
 
     [Fact]
@@ -86,6 +223,156 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         Assert.Equal(TimeSpan.FromMinutes(20), options.SessionIdleTimeout);
         Assert.Equal(TimeSpan.FromHours(8), options.SessionAbsoluteTimeout);
         Assert.True(options.EnableSlidingExpiration);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesDefaultTokenEndpointTimeout()
+    {
+        var configuration = TestConfiguration.Build();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>().Value;
+
+        Assert.Equal(TimeSpan.FromSeconds(30), options.TokenEndpointTimeout);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_BindsConfiguredTokenEndpointTimeout()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:TokenEndpointTimeout"] = "00:00:42"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>().Value;
+
+        Assert.Equal(TimeSpan.FromSeconds(42), options.TokenEndpointTimeout);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesTokenEndpointTimeout()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:TokenEndpointTimeout"] = "00:00:00"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcProviderOptions>>().Value);
+
+        Assert.Contains("TokenEndpointTimeout", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ConfiguresNamedTokenEndpointHttpClientTimeout()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:TokenEndpointTimeout"] = "00:00:42"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var client = serviceProvider.GetRequiredService<IHttpClientFactory>()
+            .CreateClient("Recrovit.OpenIdConnect.TokenEndpoint");
+
+        Assert.Equal(TimeSpan.FromSeconds(42), client.Timeout);
+    }
+
+    [Fact]
+    public async Task AddOidcAuthenticationInfrastructure_ConfiguredHttpClientsDoNotFollowRedirectsOrStoreCookies()
+    {
+        Uri? serverBaseAddress = null;
+        await using var server = await LoopbackHttpServer.StartAsync((request, _) =>
+        {
+            if (string.Equals(request.Path, "/redirect-source", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new LoopbackHttpResponse(
+                    HttpStatusCode.Found,
+                    ResponseHeaders: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Location"] = new Uri(serverBaseAddress!, "/redirect-target").AbsoluteUri,
+                        ["Set-Cookie"] = "session=redirect; Path=/"
+                    }));
+            }
+
+            if (string.Equals(request.Path, "/cookie-source", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new LoopbackHttpResponse(
+                    HttpStatusCode.OK,
+                    ResponseHeaders: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Set-Cookie"] = "session=stored; Path=/"
+                    }));
+            }
+
+            return Task.FromResult(new LoopbackHttpResponse(HttpStatusCode.OK));
+        });
+        serverBaseAddress = server.BaseAddress;
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = server.BaseAddress.AbsoluteUri,
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid"
+        }), new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var tokenEndpointClient = serviceProvider.GetRequiredService<IHttpClientFactory>()
+            .CreateClient("Recrovit.OpenIdConnect.TokenEndpoint");
+        using var tokenRedirectResponse = await tokenEndpointClient.GetAsync(new Uri(server.BaseAddress, "/redirect-source"), TestContext.Current.CancellationToken);
+        using var tokenCookieSourceResponse = await tokenEndpointClient.GetAsync(new Uri(server.BaseAddress, "/cookie-source"), TestContext.Current.CancellationToken);
+        using var tokenCookieCheckResponse = await tokenEndpointClient.GetAsync(new Uri(server.BaseAddress, "/cookie-check"), TestContext.Current.CancellationToken);
+
+        using var scope = serviceProvider.CreateScope();
+        var downstreamProxyClient = scope.ServiceProvider.GetRequiredService<IDownstreamHttpProxyClient>();
+        using var downstreamRedirectResponse = await downstreamProxyClient.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/redirect-source",
+            user: null,
+            content: null,
+            headers: [],
+            TestContext.Current.CancellationToken);
+        using var downstreamCookieSourceResponse = await downstreamProxyClient.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/cookie-source",
+            user: null,
+            content: null,
+            headers: [],
+            TestContext.Current.CancellationToken);
+        using var downstreamCookieCheckResponse = await downstreamProxyClient.SendAsync(
+            "SessionValidationApi",
+            HttpMethod.Get,
+            "/cookie-check",
+            user: null,
+            content: null,
+            headers: [],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Found, tokenRedirectResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.Found, downstreamRedirectResponse.StatusCode);
+
+        var requests = server.Requests.ToArray();
+        Assert.DoesNotContain(requests, static request => string.Equals(request.Path, "/redirect-target", StringComparison.Ordinal));
+        Assert.DoesNotContain(requests, static request =>
+            string.Equals(request.Path, "/cookie-check", StringComparison.Ordinal) &&
+            request.Headers.ContainsKey("Cookie"));
     }
 
     [Fact]
@@ -153,6 +440,60 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyRequestProtectionCustomHeaderPair()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyRequestProtection:CustomHeaderName"] = "X-Recrovit-Proxy-Intent"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
+
+        Assert.Contains("DownstreamProxyRequestProtection", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyRequestProtectionAllowedHttpOrigins()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyRequestProtection:AllowedHttpOrigins:0"] = "javascript:alert(1)"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
+
+        Assert.Contains("AllowedHttpOrigins", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ValidatesDownstreamProxyRequestProtectionAllowedWebSocketOrigins()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Host:DownstreamProxyRequestProtection:AllowedWebSocketOrigins:0"] = "https://user:pass@app.example.com"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<OptionsValidationException>(() =>
+            serviceProvider.GetRequiredService<IOptions<OidcAuthenticationOptions>>().Value);
+
+        Assert.Contains("AllowedWebSocketOrigins", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_Starts_WhenDownstreamApisMissing()
     {
         var configuration = TestConfiguration.Build();
@@ -195,8 +536,32 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
 
         using var serviceProvider = services.BuildServiceProvider();
+        using var firstScope = serviceProvider.CreateScope();
+        using var secondScope = serviceProvider.CreateScope();
 
-        Assert.NotNull(serviceProvider.GetService<IDownstreamUserTokenStore>());
+        var firstTokenStore = firstScope.ServiceProvider.GetRequiredService<IDownstreamUserTokenStore>();
+        var firstStateStore = firstScope.ServiceProvider.GetRequiredService<IOidcSessionStateStore>();
+        var secondTokenStore = secondScope.ServiceProvider.GetRequiredService<IDownstreamUserTokenStore>();
+
+        Assert.Same(firstTokenStore, firstStateStore);
+        Assert.NotSame(firstTokenStore, secondTokenStore);
+        Assert.Same(
+            firstScope.ServiceProvider.GetRequiredService<ILocalOidcSessionCoordinator>(),
+            secondScope.ServiceProvider.GetRequiredService<ILocalOidcSessionCoordinator>());
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesSingleInstanceTokenCacheDeploymentModeByDefault()
+    {
+        var configuration = TestConfiguration.Build();
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<IOptions<TokenCacheOptions>>().Value;
+
+        Assert.Equal(TokenCacheDeploymentMode.SingleInstance, options.DeploymentMode);
     }
 
     [Fact]
@@ -263,6 +628,52 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
             .Get(Microsoft.AspNetCore.Authentication.OpenIdConnect.OpenIdConnectDefaults.AuthenticationScheme);
 
         Assert.Equal(["graph.read", "openid", "profile"], oidcOptions.Scope.OrderBy(scope => scope, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_UsesEffectiveProviderOverridesForDownstreamCatalog()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:BaseUrl"] = "https://graph.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:RelativePath"] = "graph",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:BaseUrl"] = "https://provider-graph.example.com",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:RelativePath"] = "graph/v2",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:Scopes:0"] = "graph.write"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var catalog = serviceProvider.GetRequiredService<DownstreamApiCatalog>();
+        var api = catalog.GetRequired("GraphApi");
+
+        Assert.Equal("https://provider-graph.example.com", api.BaseUrl);
+        Assert.Equal("graph/v2", api.RelativePath);
+        Assert.Equal(["graph.write"], api.Scopes);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ExcludesDisabledApisFromLoginScopes()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:Scopes:0"] = "openid",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:BaseUrl"] = "https://graph.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read",
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:DownstreamApis:GraphApi:Disabled"] = "true"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var oidcOptions = serviceProvider.GetRequiredService<IOptionsMonitor<Microsoft.AspNetCore.Authentication.OpenIdConnect.OpenIdConnectOptions>>()
+            .Get(Microsoft.AspNetCore.Authentication.OpenIdConnect.OpenIdConnectDefaults.AuthenticationScheme);
+
+        Assert.Equal(["openid"], oidcOptions.Scope.OrderBy(scope => scope, StringComparer.Ordinal).ToArray());
     }
 
     [Fact]
@@ -506,11 +917,13 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
-        services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => new InMemoryTokenStore(new StoredOidcSessionTokenSet
+        var tokenStore = new InMemoryTokenStore(new StoredOidcSessionTokenSet
         {
             RefreshToken = "refresh-token",
             ExpiresAtUtc = DateTimeOffset.UtcNow.AddHours(1)
-        })));
+        });
+        services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
+        services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         var handler = new CaptureRequestHandler();
         services.Replace(ServiceDescriptor.Singleton<IHttpClientFactory>(new DelegatingHttpClientFactory(handler)));
         services.Replace(ServiceDescriptor.Singleton<IOptionsMonitor<OpenIdConnectOptions>>(new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
@@ -782,6 +1195,75 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenDevelopmentOptInAuthorityIsNotHttps()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Providers:Duende:Authority"] = "http://idp.example.com",
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:RequireProductionReadinessInDevelopment"] = bool.TrueString,
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development });
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("Production-readiness validation requires", ex.Message, StringComparison.Ordinal);
+        Assert.Contains($"{TestConfiguration.RootSectionName}:Providers:<provider>:Authority", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenProductionDownstreamApiIsNotHttps()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = "http://api.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production });
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains($"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("absolute HTTPS URI", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_AllowsNonHttpsDownstreamApiOutsideProduction()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:BaseUrl"] = "http://api.example.com",
+            [$"{TestConfiguration.RootSectionName}:DownstreamApis:SessionValidationApi:Scopes:0"] = "openid"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development });
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
     public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenProductionForwardedHeadersEnabledWithoutTrustedProxies()
     {
         var configuration = TestConfiguration.Build(new Dictionary<string, string?>
@@ -800,6 +1282,31 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
 
         var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
 
+        Assert.Contains($"{TestConfiguration.RootSectionName}:Infrastructure:KnownProxies", ex.Message, StringComparison.Ordinal);
+        Assert.Contains($"{TestConfiguration.RootSectionName}:Infrastructure:KnownNetworks", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenDevelopmentOptInForwardedHeadersEnabledWithoutTrustedProxies()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:ForwardedHeadersEnabled"] = bool.TrueString,
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:RequireProductionReadinessInDevelopment"] = bool.TrueString,
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development });
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("Production-readiness validation requires", ex.Message, StringComparison.Ordinal);
         Assert.Contains($"{TestConfiguration.RootSectionName}:Infrastructure:KnownProxies", ex.Message, StringComparison.Ordinal);
         Assert.Contains($"{TestConfiguration.RootSectionName}:Infrastructure:KnownNetworks", ex.Message, StringComparison.Ordinal);
     }
@@ -870,6 +1377,372 @@ public sealed class OidcAuthenticationServiceCollectionExtensionsTests
         var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
 
         Assert.Null(exception);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenProductionDataProtectionRepositoryMissing()
+    {
+        var configuration = TestConfiguration.Build();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production });
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("explicit shared Data Protection key repository", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenDevelopmentOptInDataProtectionRepositoryMissing()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:RequireProductionReadinessInDevelopment"] = bool.TrueString
+        });
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development });
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("Production-readiness validation requires an explicit shared Data Protection key repository", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenMultiInstanceUsesDefaultRefreshLockProvider()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:DeploymentMode"] = "MultiInstance"
+        });
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("default in-process refresh lock provider", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenMultiInstanceUsesDefaultSessionStateStore()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:DeploymentMode"] = "MultiInstance"
+        });
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(configuration, new FakeWebHostEnvironment());
+        services.Replace(ServiceDescriptor.Singleton<IOidcSessionRefreshLockProvider>(
+            new FixedLeaseRefreshLockProvider("owner", DateTimeOffset.UtcNow.AddMinutes(1))));
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("default distributed token store", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_AllowsProduction_WhenDataProtectionRepositoryConfiguredByCallback()
+    {
+        var configuration = TestConfiguration.Build();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection.PersistKeysToFileSystem(new DirectoryInfo("/callback-keys")));
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_LogsStandardWarning_WhenProductionKeyRepositoryHasNoEncryption()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production });
+        ReplaceDistributedCache(services);
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        var warning = Assert.Single(loggerFactory.Entries, entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("no key-ring encryption configuration was detected", StringComparison.Ordinal));
+        Assert.Contains("no key-ring encryption configuration was detected", warning.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("/keys", warning.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            loggerFactory.Entries.Count(entry =>
+                entry.Level == LogLevel.Warning &&
+                entry.Message.Contains("no key-ring encryption configuration was detected", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_LogsWarning_WhenProductionUsesDevelopmentDefaultTokenCacheHmacSecret()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:CacheKeyHmacSecret"] = "development-only-shared-hmac-secret"
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection
+                .PersistKeysToFileSystem(new DirectoryInfo("/token-cache-warning-keys"))
+                .ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        const string expectedWarningFragment = "development-only TokenCache:CacheKeyHmacSecret default";
+        var warning = Assert.Single(loggerFactory.Entries, entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains(expectedWarningFragment, StringComparison.Ordinal));
+        Assert.Contains(expectedWarningFragment, warning.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("development-only-shared-hmac-secret", warning.Message, StringComparison.Ordinal);
+        Assert.Equal(1, loggerFactory.Entries.Count(entry => entry.Level == LogLevel.Warning));
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_DoesNotLogWarning_WhenProductionUsesCustomTokenCacheHmacSecret()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:CacheKeyHmacSecret"] = "production-hmac-secret-0123456789"
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection
+                .PersistKeysToFileSystem(new DirectoryInfo("/token-cache-custom-keys"))
+                .ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        const string expectedWarningFragment = "development-only TokenCache:CacheKeyHmacSecret default";
+        Assert.DoesNotContain(
+            loggerFactory.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains(expectedWarningFragment, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_DoesNotLogWarning_WhenDevelopmentUsesDevelopmentDefaultTokenCacheHmacSecret()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:CacheKeyHmacSecret"] = "development-only-shared-hmac-secret"
+        });
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development });
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        const string expectedWarningFragment = "development-only TokenCache:CacheKeyHmacSecret default";
+        Assert.DoesNotContain(
+            loggerFactory.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains(expectedWarningFragment, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_DoesNotLogWarning_WhenDevelopmentOptInUsesDevelopmentDefaultTokenCacheHmacSecret()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:TokenCache:CacheKeyHmacSecret"] = "development-only-shared-hmac-secret",
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:RequireProductionReadinessInDevelopment"] = bool.TrueString,
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development },
+            dataProtection => dataProtection.ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        const string expectedWarningFragment = "development-only TokenCache:CacheKeyHmacSecret default";
+        Assert.DoesNotContain(
+            loggerFactory.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains(expectedWarningFragment, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenHardenedProductionMissingApplicationIsolation()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionSecurityProfile"] = nameof(DataProtectionSecurityProfile.Hardened),
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection.ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("requires explicit application isolation", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenHardenedProductionMissingEncryption()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionSecurityProfile"] = nameof(DataProtectionSecurityProfile.Hardened),
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection.SetApplicationName("Recrovit.Tests.Hardened"));
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("requires key-ring encryption", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_AllowsStartup_WhenHardenedProductionDataProtectionIsConfigured()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionSecurityProfile"] = nameof(DataProtectionSecurityProfile.Hardened)
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Production },
+            dataProtection => dataProtection
+                .SetApplicationName("Recrovit.Tests.Hardened")
+                .PersistKeysToFileSystem(new DirectoryInfo("/hardened-keys"))
+                .ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_LogsWarningsWithoutBlocking_WhenHardenedDevelopmentConfigurationIsIncomplete()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionSecurityProfile"] = nameof(DataProtectionSecurityProfile.Hardened),
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        var loggerFactory = new ListLoggerFactory();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development });
+        services.Replace(ServiceDescriptor.Singleton<ILoggerFactory>(loggerFactory));
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var exception = Record.Exception(() => RunStartupFilters(serviceProvider));
+
+        Assert.Null(exception);
+        Assert.Contains(
+            loggerFactory.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains("requires explicit application isolation", StringComparison.Ordinal));
+        Assert.Contains(
+            loggerFactory.Entries,
+            entry => entry.Level == LogLevel.Warning
+                && entry.Message.Contains("requires key-ring encryption", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AddOidcAuthenticationInfrastructure_ThrowsOnStartup_WhenDevelopmentOptInHardenedConfigurationIsIncomplete()
+    {
+        var configuration = TestConfiguration.Build(new Dictionary<string, string?>
+        {
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionSecurityProfile"] = nameof(DataProtectionSecurityProfile.Hardened),
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:RequireProductionReadinessInDevelopment"] = bool.TrueString,
+            [$"{TestConfiguration.RootSectionName}:Infrastructure:DataProtectionKeysPath"] = "/keys"
+        });
+        using var certificate = TestCertificates.CreateTemporaryPfx();
+        var services = new ServiceCollection();
+        services.AddOidcAuthenticationInfrastructure(
+            configuration,
+            new FakeWebHostEnvironment { EnvironmentName = Environments.Development },
+            dataProtection => dataProtection.ProtectKeysWithCertificate(certificate.Certificate));
+        ReplaceDistributedCache(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RunStartupFilters(serviceProvider));
+
+        Assert.Contains("Production-readiness validation with Hardened Data Protection requires explicit application isolation", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

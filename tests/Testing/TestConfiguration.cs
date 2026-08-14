@@ -28,7 +28,8 @@ internal static class TestConfiguration
             [$"{RootSectionName}:Providers:Duende:RemoteSignOutPath"] = "/signout-oidc",
             [$"{RootSectionName}:Providers:Duende:SignedOutRedirectPath"] = "/",
             [$"{RootSectionName}:Providers:Duende:Scopes:0"] = "openid",
-            [$"{RootSectionName}:TokenCache:CacheKeyPrefix"] = "test-cache"
+            [$"{RootSectionName}:TokenCache:CacheKeyPrefix"] = "test-cache",
+            [$"{RootSectionName}:TokenCache:CacheKeyHmacSecret"] = "test-hmac-secret-0123456789"
         };
 
         if (overrides is null)

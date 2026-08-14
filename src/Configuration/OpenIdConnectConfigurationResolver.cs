@@ -28,6 +28,9 @@ internal static class OpenIdConnectConfigurationResolver
     public static IConfigurationSection GetDownstreamApisSection(IConfiguration configuration)
         => GetRootSection(configuration).GetSection(DownstreamApisSectionName);
 
+    public static IConfigurationSection GetActiveProviderDownstreamApisSection(IConfiguration configuration)
+        => GetActiveProviderSection(configuration).GetSection(DownstreamApisSectionName);
+
     public static string GetActiveProviderName(IConfiguration configuration)
     {
         var providerName = GetRootSection(configuration).GetValue<string>(ProviderKey);

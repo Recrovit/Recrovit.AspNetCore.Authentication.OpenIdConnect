@@ -12,6 +12,8 @@ internal static class OidcLogEvents
     public static readonly EventId TicketReceived = new(1005, nameof(TicketReceived));
     public static readonly EventId SessionTokenPersisted = new(1006, nameof(SessionTokenPersisted));
     public static readonly EventId TicketTokensCleared = new(1007, nameof(TicketTokensCleared));
+    public static readonly EventId DataProtectionConfigurationWarning = new(1008, nameof(DataProtectionConfigurationWarning));
+    public static readonly EventId DefaultTokenCacheHmacSecretWarning = new(1009, nameof(DefaultTokenCacheHmacSecretWarning));
 
     public static readonly EventId LoginRequested = new(2000, nameof(LoginRequested));
     public static readonly EventId LogoutRequested = new(2001, nameof(LogoutRequested));
@@ -39,6 +41,8 @@ internal static class OidcLogEvents
     public static readonly EventId ScopeValidationIncomplete = new(3014, nameof(ScopeValidationIncomplete));
     public static readonly EventId ScopeValidationMismatch = new(3015, nameof(ScopeValidationMismatch));
     public static readonly EventId RefreshResponseInvalid = new(3016, nameof(RefreshResponseInvalid));
+    public static readonly EventId RefreshLockLeaseExpired = new(3017, nameof(RefreshLockLeaseExpired));
+    public static readonly EventId RefreshedTokensReusedAfterConcurrentUpdate = new(3018, nameof(RefreshedTokensReusedAfterConcurrentUpdate));
 
     public static readonly EventId SessionTokenCacheRead = new(4000, nameof(SessionTokenCacheRead));
     public static readonly EventId ApiTokenCacheRead = new(4001, nameof(ApiTokenCacheRead));
@@ -47,6 +51,7 @@ internal static class OidcLogEvents
     public static readonly EventId TokenStoreRemoveStarted = new(4004, nameof(TokenStoreRemoveStarted));
     public static readonly EventId TokenStoreRemoveCompleted = new(4005, nameof(TokenStoreRemoveCompleted));
     public static readonly EventId TokenStorePayloadInvalid = new(4006, nameof(TokenStorePayloadInvalid));
+    public static readonly EventId TokenStorePayloadCleanupFailed = new(4007, nameof(TokenStorePayloadCleanupFailed));
 
     public static readonly EventId SessionCleanupStarted = new(5000, nameof(SessionCleanupStarted));
     public static readonly EventId SessionCleanupTokensRemoved = new(5001, nameof(SessionCleanupTokensRemoved));
@@ -56,6 +61,8 @@ internal static class OidcLogEvents
 
     public static readonly EventId AuthorizationRedirectSuppressed = new(6000, nameof(AuthorizationRedirectSuppressed));
     public static readonly EventId AuthorizationStatusCodeWritten = new(6001, nameof(AuthorizationStatusCodeWritten));
+
+    public static readonly EventId DownstreamProxyRequestRejected = new(7000, nameof(DownstreamProxyRequestRejected));
 }
 
 internal static class OidcLogScopes
@@ -65,7 +72,9 @@ internal static class OidcLogScopes
         string? providerName = null,
         string? downstreamApiName = null,
         string? endpoint = null,
-        string? flowStep = null)
+        string? flowStep = null,
+        string? leaseOwnerToken = null,
+        DateTimeOffset? leaseExpiresAtUtc = null)
     {
         var scope = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
@@ -90,6 +99,16 @@ internal static class OidcLogScopes
         if (!string.IsNullOrWhiteSpace(flowStep))
         {
             scope["FlowStep"] = flowStep;
+        }
+
+        if (!string.IsNullOrWhiteSpace(leaseOwnerToken))
+        {
+            scope["LeaseOwnerToken"] = leaseOwnerToken;
+        }
+
+        if (leaseExpiresAtUtc is not null)
+        {
+            scope["LeaseExpiresAtUtc"] = leaseExpiresAtUtc;
         }
 
         return scope;
@@ -121,6 +140,12 @@ internal static partial class OidcInfrastructureLog
 
     [LoggerMessage(EventId = 1007, Level = LogLevel.Debug, Message = "OIDC ticket tokens cleared from authentication properties for provider {ProviderName}.")]
     public static partial void TicketTokensCleared(ILogger logger, string providerName);
+
+    [LoggerMessage(EventId = 1008, Level = LogLevel.Warning, Message = "{Message}")]
+    public static partial void DataProtectionConfigurationWarning(ILogger logger, string message);
+
+    [LoggerMessage(EventId = 1009, Level = LogLevel.Warning, Message = "Production is using the built-in development-only TokenCache:CacheKeyHmacSecret default. Configure a deployment-specific secret from a secure external source.")]
+    public static partial void DefaultTokenCacheHmacSecretWarning(ILogger logger);
 }
 
 internal static partial class OidcEndpointLog
@@ -202,6 +227,12 @@ internal static partial class OidcTokenProviderLog
 
     [LoggerMessage(EventId = 3016, Level = LogLevel.Error, Message = "Refresh token response payload was invalid. ProviderName={ProviderName}, DownstreamApiName={DownstreamApiName}, ExceptionType={ExceptionType}")]
     public static partial void RefreshResponseInvalid(ILogger logger, Exception exception, string providerName, string downstreamApiName, string exceptionType);
+
+    [LoggerMessage(EventId = 3017, Level = LogLevel.Warning, Message = "Refresh result was discarded because the refresh lease expired before persistence. ProviderName={ProviderName}, DownstreamApiName={DownstreamApiName}")]
+    public static partial void RefreshLockLeaseExpired(ILogger logger, string providerName, string downstreamApiName);
+
+    [LoggerMessage(EventId = 3018, Level = LogLevel.Information, Message = "A newer concurrent session token state was reused after compare-and-swap contention. ProviderName={ProviderName}, DownstreamApiName={DownstreamApiName}")]
+    public static partial void RefreshedTokensReusedAfterConcurrentUpdate(ILogger logger, string providerName, string downstreamApiName);
 }
 
 internal static partial class OidcTokenStoreLog
@@ -226,6 +257,9 @@ internal static partial class OidcTokenStoreLog
 
     [LoggerMessage(EventId = 4006, Level = LogLevel.Warning, Message = "OIDC token store payload could not be read. CacheEntryType={CacheEntryType}, FailureCategory={FailureCategory}")]
     public static partial void TokenStorePayloadInvalid(ILogger logger, Exception exception, string cacheEntryType, string failureCategory);
+
+    [LoggerMessage(EventId = 4007, Level = LogLevel.Error, Message = "OIDC token store payload cleanup failed. CacheEntryType={CacheEntryType}")]
+    public static partial void TokenStorePayloadCleanupFailed(ILogger logger, Exception exception, string cacheEntryType);
 }
 
 internal static partial class OidcSessionCleanupLog
@@ -253,4 +287,10 @@ internal static partial class OidcAuthorizationLog
 
     [LoggerMessage(EventId = 6001, Level = LogLevel.Information, Message = "Authentication middleware wrote status code instead of redirect. StatusCode={StatusCode}, Reason={Reason}")]
     public static partial void AuthorizationStatusCodeWritten(ILogger logger, int statusCode, string reason);
+}
+
+internal static partial class OidcProxyLog
+{
+    [LoggerMessage(EventId = 7000, Level = LogLevel.Warning, Message = "Rejected downstream proxy request before outbound dispatch. Path={Path}, Method={Method}, RequestType={RequestType}, Reason={Reason}")]
+    public static partial void DownstreamProxyRequestRejected(ILogger logger, string path, string method, string requestType, string reason);
 }

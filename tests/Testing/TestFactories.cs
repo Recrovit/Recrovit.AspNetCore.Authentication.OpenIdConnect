@@ -15,19 +15,22 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
 
 internal static class TestFactories
 {
-    public static DownstreamApiCatalog CreateDownstreamApiCatalog(string relativePath = "session-check")
+    public static DownstreamApiCatalog CreateDownstreamApiCatalog(
+        string relativePath = "session-check",
+        string sessionValidationBaseUrl = "https://api.example.com",
+        string graphApiBaseUrl = "https://graph.example.com")
     {
         return new DownstreamApiCatalog(new Dictionary<string, DownstreamApiDefinition>(StringComparer.OrdinalIgnoreCase)
         {
             ["SessionValidationApi"] = new()
             {
-                BaseUrl = "https://api.example.com",
+                BaseUrl = sessionValidationBaseUrl,
                 Scopes = ["openid"],
                 RelativePath = relativePath
             },
             ["GraphApi"] = new()
             {
-                BaseUrl = "https://graph.example.com",
+                BaseUrl = graphApiBaseUrl,
                 Scopes = ["graph.read"],
                 RelativePath = "graph"
             }
@@ -50,7 +53,8 @@ internal static class TestFactories
         return new TokenCacheOptions
         {
             RefreshBeforeExpirationSeconds = 60,
-            CacheKeyPrefix = "test-cache"
+            CacheKeyPrefix = "test-cache",
+            CacheKeyHmacSecret = "test-hmac-secret-0123456789"
         };
     }
 
@@ -72,6 +76,7 @@ internal static class TestFactories
             [$"{TestConfiguration.RootSectionName}:DownstreamApis:GraphApi:Scopes:0"] = "graph.read"
         }), environment);
         services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
+        services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         services.Replace(ServiceDescriptor.Singleton(httpClientFactory));
         services.Replace(ServiceDescriptor.Singleton<IOptionsMonitor<OpenIdConnectOptions>>(openIdOptionsMonitor ?? new StaticOptionsMonitor<OpenIdConnectOptions>(new OpenIdConnectOptions
         {
@@ -96,11 +101,20 @@ internal static class TestFactories
         IDownstreamUserTokenProvider tokenProvider,
         ILogger<DownstreamHttpProxyClient> logger)
     {
+        return CreateHttpProxyClient(httpClient, tokenProvider, logger, CreateDownstreamApiCatalog(relativePath: "gateway"));
+    }
+
+    public static DownstreamHttpProxyClient CreateHttpProxyClient(
+        HttpClient httpClient,
+        IDownstreamUserTokenProvider tokenProvider,
+        ILogger<DownstreamHttpProxyClient> logger,
+        DownstreamApiCatalog downstreamApiCatalog)
+    {
         return new DownstreamHttpProxyClient(
             logger,
             httpClient,
             tokenProvider,
-            CreateDownstreamApiCatalog(relativePath: "gateway"));
+            downstreamApiCatalog);
     }
 
     public static Endpoint CreateEndpoint(params object[] metadata)

@@ -19,7 +19,27 @@ public sealed class DownstreamApiDefinition
     public string[] Scopes { get; init; } = [];
 
     /// <summary>
+    /// Gets a value indicating whether the default forwarded request headers are included for this downstream API.
+    /// </summary>
+    public bool IncludeDefaultForwardedRequestHeaders { get; init; } = true;
+
+    /// <summary>
+    /// Gets the request headers that may be forwarded to the downstream API.
+    /// </summary>
+    public string[] ForwardedRequestHeaders { get; init; } = [];
+
+    /// <summary>
+    /// Gets the response headers that may be forwarded from the downstream API in addition to the default allowlist.
+    /// </summary>
+    public string[] ForwardedResponseHeaders { get; init; } = [];
+
+    /// <summary>
     /// Gets the relative path appended to the base URL.
     /// </summary>
     public string RelativePath { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Gets a value indicating whether the downstream API is disabled.
+    /// </summary>
+    public bool Disabled { get; init; }
 }

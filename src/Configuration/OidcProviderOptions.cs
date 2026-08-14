@@ -45,6 +45,11 @@ public sealed class OidcProviderOptions
     public string[] Scopes { get; init; } = [];
 
     /// <summary>
+    /// Gets the timeout applied to OIDC token endpoint refresh requests.
+    /// </summary>
+    public TimeSpan TokenEndpointTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Gets the callback path used after sign-in.
     /// </summary>
     public string CallbackPath { get; init; } = "/signin-oidc";

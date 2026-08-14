@@ -10,7 +10,10 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 /// <summary>
 /// Clears the local authentication session and writes reauthentication responses.
 /// </summary>
-internal sealed class OidcSessionCleanupService(IDownstreamUserTokenStore tokenStore, ILogger<OidcSessionCleanupService> logger)
+internal sealed class OidcSessionCleanupService(
+    IDownstreamUserTokenStore tokenStore,
+    ILocalOidcSessionCoordinator localSessionCoordinator,
+    ILogger<OidcSessionCleanupService> logger)
 {
     /// <summary>
     /// Clears the local cookie-based session and removes any stored user tokens.
@@ -26,8 +29,19 @@ internal sealed class OidcSessionCleanupService(IDownstreamUserTokenStore tokenS
 
         if (isAuthenticated)
         {
-            await tokenStore.RemoveAsync(principalToCleanup, httpContext.RequestAborted);
+            await using var localSessionLock = await localSessionCoordinator.AcquireAsync(
+                principalToCleanup,
+                httpContext.RequestAborted);
+            await LocalOidcSessionStoreOperations.RemoveAsync(
+                tokenStore,
+                principalToCleanup,
+                localSessionLock,
+                httpContext.RequestAborted);
             OidcSessionCleanupLog.SessionCleanupTokensRemoved(logger, reason);
+
+            await httpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            OidcSessionCleanupLog.SessionCleanupCookieCleared(logger, reason);
+            return;
         }
 
         await httpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);

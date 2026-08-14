@@ -1,9 +1,12 @@
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Security.Cryptography;
+using System.Text;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
@@ -13,6 +16,80 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Authentication;
 
 public sealed class DistributedDownstreamUserTokenStoreTests
 {
+    [Fact]
+    public async Task StoreOperations_AreSerializedAcrossStoreInstancesForSameSession()
+    {
+        using var serviceProvider = CreateCoordinatorServiceProvider();
+        var coordinator = serviceProvider.GetRequiredService<ILocalOidcSessionCoordinator>();
+        var distributedCache = new BlockingSetDistributedCache();
+        var dataProtectionProvider = new EphemeralDataProtectionProvider();
+        var firstStore = CreateStore(distributedCache, coordinator: coordinator, dataProtectionProvider: dataProtectionProvider);
+        var secondStore = CreateStore(distributedCache, coordinator: coordinator, dataProtectionProvider: dataProtectionProvider);
+        var user = TestUsers.CreateAuthenticatedUser();
+
+        var sessionWrite = firstStore.StoreSessionTokenSetAsync(user, new StoredOidcSessionTokenSet
+        {
+            RefreshToken = "refresh-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+        }, TestContext.Current.CancellationToken);
+        await distributedCache.FirstSetStarted;
+
+        var apiWrite = secondStore.StoreApiTokenAsync(user, "SessionValidationApi", ["openid"], new CachedDownstreamApiTokenEntry
+        {
+            AccessToken = "access-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+        }, TestContext.Current.CancellationToken);
+
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.False(apiWrite.IsCompleted);
+
+        distributedCache.ReleaseFirstSet();
+        await Task.WhenAll(sessionWrite, apiWrite);
+
+        Assert.Equal("refresh-token", (await firstStore.GetSessionTokenSetAsync(user, TestContext.Current.CancellationToken))!.RefreshToken);
+        Assert.Equal(
+            "access-token",
+            (await firstStore.GetApiTokenAsync(user, "SessionValidationApi", ["openid"], TestContext.Current.CancellationToken))!.AccessToken);
+    }
+
+    [Fact]
+    public async Task StoreApiTokenAsync_PreservesBothEntries_WhenDifferentApisAreStoredConcurrently()
+    {
+        using var serviceProvider = CreateCoordinatorServiceProvider();
+        var coordinator = serviceProvider.GetRequiredService<ILocalOidcSessionCoordinator>();
+        var distributedCache = new BlockingSetDistributedCache();
+        var dataProtectionProvider = new EphemeralDataProtectionProvider();
+        var firstStore = CreateStore(distributedCache, coordinator: coordinator, dataProtectionProvider: dataProtectionProvider);
+        var secondStore = CreateStore(distributedCache, coordinator: coordinator, dataProtectionProvider: dataProtectionProvider);
+        var user = TestUsers.CreateAuthenticatedUser();
+
+        var sessionValidationWrite = firstStore.StoreApiTokenAsync(user, "SessionValidationApi", ["openid"], new CachedDownstreamApiTokenEntry
+        {
+            AccessToken = "session-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+        }, TestContext.Current.CancellationToken);
+        await distributedCache.FirstSetStarted;
+
+        var graphWrite = secondStore.StoreApiTokenAsync(user, "GraphApi", ["graph.read"], new CachedDownstreamApiTokenEntry
+        {
+            AccessToken = "graph-token",
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+        }, TestContext.Current.CancellationToken);
+
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.False(graphWrite.IsCompleted);
+
+        distributedCache.ReleaseFirstSet();
+        await Task.WhenAll(sessionValidationWrite, graphWrite);
+
+        Assert.Equal(
+            "session-token",
+            (await firstStore.GetApiTokenAsync(user, "SessionValidationApi", ["openid"], TestContext.Current.CancellationToken))!.AccessToken);
+        Assert.Equal(
+            "graph-token",
+            (await firstStore.GetApiTokenAsync(user, "GraphApi", ["graph.read"], TestContext.Current.CancellationToken))!.AccessToken);
+    }
+
     [Fact]
     public async Task StoreSessionTokenSetAsync_RoundTripsEntriesBySession()
     {
@@ -68,7 +145,7 @@ public sealed class DistributedDownstreamUserTokenStoreTests
             ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
         }, CancellationToken.None);
 
-        var rawValue = await distributedCache.GetStringAsync("test-cache:session:Duende:https://idp.example.com:user-123:session-123", CancellationToken.None);
+        var rawValue = await distributedCache.GetStringAsync(BuildSessionCacheKey(user), CancellationToken.None);
 
         Assert.NotNull(rawValue);
         Assert.DoesNotContain("refresh-token", rawValue, StringComparison.Ordinal);
@@ -76,10 +153,32 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     }
 
     [Fact]
+    public async Task GetSessionTokenSetAsync_DoesNotReadLegacyRawKeySessionPayload()
+    {
+        var distributedCache = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
+        var user = TestUsers.CreateAuthenticatedUser();
+        var legacyRawKey = BuildLegacyRawSessionCacheKey(user);
+        await distributedCache.SetStringAsync(
+            legacyRawKey,
+            """{"version":"v1","tokenSet":{"refreshToken":"legacy-refresh","idToken":"legacy-id","expiresAtUtc":"2030-01-01T00:00:00Z"}}""",
+            CancellationToken.None);
+        var store = CreateStore(distributedCache);
+
+        var entry = await store.GetSessionTokenSetAsync(user, CancellationToken.None);
+        var newSessionCacheKey = BuildSessionCacheKey(user);
+
+        Assert.Null(entry);
+        Assert.NotEqual(legacyRawKey, newSessionCacheKey);
+        Assert.DoesNotContain("user-123", newSessionCacheKey, StringComparison.Ordinal);
+        Assert.DoesNotContain("https://idp.example.com", newSessionCacheKey, StringComparison.Ordinal);
+        Assert.DoesNotContain("session-123", newSessionCacheKey, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GetSessionTokenSetAsync_ReturnsNull_WhenPayloadCannotBeUnprotected()
     {
         var distributedCache = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
-        await distributedCache.SetStringAsync("test-cache:session:Duende:https://idp.example.com:user-123:session-123", "invalid-payload", CancellationToken.None);
+        await distributedCache.SetStringAsync(BuildSessionCacheKey(TestUsers.CreateAuthenticatedUser()), "invalid-payload", CancellationToken.None);
         var store = CreateStore(distributedCache);
 
         var entry = await store.GetSessionTokenSetAsync(TestUsers.CreateAuthenticatedUser(), CancellationToken.None);
@@ -91,22 +190,61 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     public async Task GetSessionTokenSetAsync_LogsWarning_WhenPayloadCannotBeUnprotected()
     {
         var distributedCache = new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions()));
-        await distributedCache.SetStringAsync("test-cache:session:Duende:https://idp.example.com:user-123:session-123", "invalid-payload", CancellationToken.None);
+        await distributedCache.SetStringAsync(BuildSessionCacheKey(TestUsers.CreateAuthenticatedUser()), "invalid-payload", CancellationToken.None);
         var logger = new ListLogger<DistributedDownstreamUserTokenStore>();
         var store = CreateStore(distributedCache, logger: logger);
 
         _ = await store.GetSessionTokenSetAsync(TestUsers.CreateAuthenticatedUser(), CancellationToken.None);
 
-        var warning = Assert.Single(logger.Entries, static entry => entry.Level == LogLevel.Warning);
+        var warning = Assert.Single(logger.Entries, static entry => entry.EventId.Name == "TokenStorePayloadInvalid");
         Assert.Equal("TokenStorePayloadInvalid", warning.EventId.Name);
         Assert.DoesNotContain("test-cache:session:", warning.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetSessionTokenSetAsync_RemovesPayload_WhenPayloadCannotBeUnprotected()
+    {
+        var distributedCache = new RecordingDistributedCache
+        {
+            StoredValue = "invalid-payload"
+        };
+        var store = CreateStore(distributedCache);
+
+        var entry = await store.GetSessionTokenSetAsync(TestUsers.CreateAuthenticatedUser(), CancellationToken.None);
+
+        Assert.Null(entry);
+        Assert.Equal(1, distributedCache.RemoveAsyncCallCount);
+    }
+
+    [Fact]
+    public async Task GetSessionTokenSetAsync_WaitsForSessionLockBeforeRemovingCorruptedPayload()
+    {
+        using var serviceProvider = CreateCoordinatorServiceProvider();
+        var coordinator = serviceProvider.GetRequiredService<ILocalOidcSessionCoordinator>();
+        var distributedCache = new RecordingDistributedCache { StoredValue = "invalid-payload" };
+        var store = CreateStore(distributedCache, coordinator: coordinator);
+        var user = TestUsers.CreateAuthenticatedUser();
+        var currentOwner = await coordinator.AcquireAsync(user, TestContext.Current.CancellationToken);
+
+        var read = store.GetSessionTokenSetAsync(user, TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+
+        Assert.False(read.IsCompleted);
+        Assert.Equal(0, distributedCache.RemoveAsyncCallCount);
+
+        await currentOwner.DisposeAsync();
+
+        Assert.Null(await read);
+        Assert.Equal(1, distributedCache.RemoveAsyncCallCount);
     }
 
     [Fact]
     public async Task StoreApiTokenAsync_PreservesExpectedTtlPolicy()
     {
         var distributedCache = new RecordingDistributedCache();
-        var store = CreateStore(distributedCache);
+        var timeProvider = new FixedTimeProvider(DateTimeOffset.Parse("2026-07-31T10:00:00Z"));
+        var store = CreateStore(distributedCache, timeProvider: timeProvider);
+        var expiresAtUtc = timeProvider.GetUtcNow().AddMinutes(5);
 
         await store.StoreApiTokenAsync(
             TestUsers.CreateAuthenticatedUser(),
@@ -115,16 +253,13 @@ public sealed class DistributedDownstreamUserTokenStoreTests
             new CachedDownstreamApiTokenEntry
             {
                 AccessToken = "access-token",
-                ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5)
+                ExpiresAtUtc = expiresAtUtc
             },
             CancellationToken.None);
 
-        var apiWrite = Assert.Single(distributedCache.Writes, write => write.Key.Contains(":api:", StringComparison.Ordinal));
+        var apiWrite = Assert.Single(distributedCache.Writes);
         Assert.NotNull(apiWrite.Options);
-        Assert.InRange(
-            apiWrite.Options.AbsoluteExpirationRelativeToNow!.Value,
-            TimeSpan.FromHours(12).Add(TimeSpan.FromMinutes(4)),
-            TimeSpan.FromHours(12).Add(TimeSpan.FromMinutes(6)));
+        Assert.Equal(TimeSpan.FromHours(12).Add(expiresAtUtc - timeProvider.GetUtcNow()), apiWrite.Options.AbsoluteExpirationRelativeToNow);
     }
 
     [Fact]
@@ -146,7 +281,10 @@ public sealed class DistributedDownstreamUserTokenStoreTests
 
         Assert.Contains(
             distributedCache.Writes.Select(write => write.Key),
-            key => key.Contains("test-cache:api:Duende:https://idp.example.com:user-123:session-123:SessionValidationApi:", StringComparison.Ordinal));
+            key => key.StartsWith("test-cache:session:", StringComparison.Ordinal)
+                && !key.Contains("user-123", StringComparison.Ordinal)
+                && !key.Contains("https://idp.example.com", StringComparison.Ordinal)
+                && !key.Contains("session-123", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -328,7 +466,10 @@ public sealed class DistributedDownstreamUserTokenStoreTests
 
         Assert.Contains(
             distributedCache.Writes.Select(write => write.Key),
-            key => string.Equals("test-cache:session:Duende:https://idp.example.com:user-123:session-123", key, StringComparison.Ordinal));
+            key => key.StartsWith("test-cache:session:", StringComparison.Ordinal)
+                && !key.Contains("user-123", StringComparison.Ordinal)
+                && !key.Contains("https://idp.example.com", StringComparison.Ordinal)
+                && !key.Contains("session-123", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -385,29 +526,77 @@ public sealed class DistributedDownstreamUserTokenStoreTests
     private static DistributedDownstreamUserTokenStore CreateStore(
         IDistributedCache distributedCache,
         string providerName = "Duende",
-        ILogger<DistributedDownstreamUserTokenStore>? logger = null)
+        ILogger<DistributedDownstreamUserTokenStore>? logger = null,
+        TimeProvider? timeProvider = null,
+        ILocalOidcSessionCoordinator? coordinator = null,
+        IDataProtectionProvider? dataProtectionProvider = null)
     {
-        return new DistributedDownstreamUserTokenStore(
+        var activeProviderOptions = Options.Create(new ActiveOidcProviderOptions
+        {
+            ProviderName = providerName
+        });
+        var tokenCacheOptions = Options.Create(new TokenCacheOptions
+        {
+            CacheKeyPrefix = "test-cache",
+            CacheKeyHmacSecret = "test-hmac-secret-0123456789"
+        });
+
+        return coordinator is null
+            ? new DistributedDownstreamUserTokenStore(
             distributedCache,
-            new EphemeralDataProtectionProvider(),
-            Options.Create(new TokenCacheOptions
-            {
-                CacheKeyPrefix = "test-cache"
-            }),
-            Options.Create(new ActiveOidcProviderOptions
-            {
-                ProviderName = providerName
-            }),
-            logger ?? NullLogger<DistributedDownstreamUserTokenStore>.Instance);
+            dataProtectionProvider ?? new EphemeralDataProtectionProvider(),
+            tokenCacheOptions,
+            activeProviderOptions,
+            logger ?? NullLogger<DistributedDownstreamUserTokenStore>.Instance,
+            timeProvider ?? TimeProvider.System)
+            : new DistributedDownstreamUserTokenStore(
+                distributedCache,
+                dataProtectionProvider ?? new EphemeralDataProtectionProvider(),
+                tokenCacheOptions,
+                activeProviderOptions,
+                logger ?? NullLogger<DistributedDownstreamUserTokenStore>.Instance,
+                coordinator,
+                timeProvider ?? TimeProvider.System);
+    }
+
+    private static ServiceProvider CreateCoordinatorServiceProvider()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(), new FakeWebHostEnvironment());
+        return services.BuildServiceProvider();
+    }
+
+    private static string BuildSessionCacheKey(System.Security.Claims.ClaimsPrincipal user)
+    {
+        var subjectId = user.FindFirst("sub")?.Value ?? throw new InvalidOperationException();
+        var issuer = user.FindFirst("iss")?.Value ?? user.FindFirst("sub")?.Issuer ?? throw new InvalidOperationException();
+        var sessionId = user.FindFirst(OidcAuthenticationConstants.ProviderClaimNames.LocalSessionId)?.Value ?? throw new InvalidOperationException();
+        var payload = $"Duende\n{issuer}\n{subjectId}\n{sessionId}";
+        var hash = HMACSHA256.HashData(
+            Encoding.UTF8.GetBytes("test-hmac-secret-0123456789"),
+            Encoding.UTF8.GetBytes(payload));
+        return $"test-cache:session:{Convert.ToHexString(hash)}";
+    }
+
+    private static string BuildLegacyRawSessionCacheKey(System.Security.Claims.ClaimsPrincipal user)
+    {
+        var subjectId = user.FindFirst("sub")?.Value ?? throw new InvalidOperationException();
+        var issuer = user.FindFirst("iss")?.Value ?? user.FindFirst("sub")?.Issuer ?? throw new InvalidOperationException();
+        var sessionId = user.FindFirst(OidcAuthenticationConstants.ProviderClaimNames.LocalSessionId)?.Value ?? throw new InvalidOperationException();
+        return $"test-cache:session:Duende:{issuer}:{subjectId}:{sessionId}";
     }
 
     private sealed class RecordingDistributedCache : IDistributedCache
     {
         public List<(string Key, DistributedCacheEntryOptions Options)> Writes { get; } = [];
+        public string? StoredValue { get; set; }
+        public int RemoveAsyncCallCount { get; private set; }
 
         public byte[]? Get(string key) => null;
 
-        public Task<byte[]?> GetAsync(string key, CancellationToken token = default) => Task.FromResult<byte[]?>(null);
+        public Task<byte[]?> GetAsync(string key, CancellationToken token = default)
+            => Task.FromResult(StoredValue is null ? null : Encoding.UTF8.GetBytes(StoredValue));
 
         public void Refresh(string key)
         {
@@ -419,7 +608,12 @@ public sealed class DistributedDownstreamUserTokenStoreTests
         {
         }
 
-        public Task RemoveAsync(string key, CancellationToken token = default) => Task.CompletedTask;
+        public Task RemoveAsync(string key, CancellationToken token = default)
+        {
+            RemoveAsyncCallCount++;
+            StoredValue = null;
+            return Task.CompletedTask;
+        }
 
         public void Set(string key, byte[] value, DistributedCacheEntryOptions options)
         {
@@ -430,6 +624,47 @@ public sealed class DistributedDownstreamUserTokenStoreTests
         {
             Writes.Add((key, options));
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class BlockingSetDistributedCache : IDistributedCache
+    {
+        private readonly MemoryDistributedCache inner = new(Options.Create(new MemoryDistributedCacheOptions()));
+        private readonly TaskCompletionSource firstSetStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource releaseFirstSet = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int setCount;
+
+        public Task FirstSetStarted => firstSetStarted.Task;
+
+        public void ReleaseFirstSet() => releaseFirstSet.TrySetResult();
+
+        public byte[]? Get(string key) => inner.Get(key);
+
+        public Task<byte[]?> GetAsync(string key, CancellationToken token = default) => inner.GetAsync(key, token);
+
+        public void Refresh(string key) => inner.Refresh(key);
+
+        public Task RefreshAsync(string key, CancellationToken token = default) => inner.RefreshAsync(key, token);
+
+        public void Remove(string key) => inner.Remove(key);
+
+        public Task RemoveAsync(string key, CancellationToken token = default) => inner.RemoveAsync(key, token);
+
+        public void Set(string key, byte[] value, DistributedCacheEntryOptions options) => inner.Set(key, value, options);
+
+        public async Task SetAsync(
+            string key,
+            byte[] value,
+            DistributedCacheEntryOptions options,
+            CancellationToken token = default)
+        {
+            if (Interlocked.Increment(ref setCount) == 1)
+            {
+                firstSetStarted.TrySetResult();
+                await releaseFirstSet.Task.WaitAsync(token);
+            }
+
+            await inner.SetAsync(key, value, options, token);
         }
     }
 }

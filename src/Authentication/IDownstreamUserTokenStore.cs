@@ -58,4 +58,5 @@ public interface IDownstreamUserTokenStore
     /// <param name="user">The authenticated session principal whose token entry should be removed.</param>
     /// <param name="cancellationToken">The cancellation token for the asynchronous operation.</param>
     Task RemoveAsync(ClaimsPrincipal user, CancellationToken cancellationToken);
+
 }

@@ -87,7 +87,9 @@ public sealed class OidcTokenPersistenceSecurityTests
         var services = new ServiceCollection();
         services.AddOidcAuthenticationInfrastructure(TestConfiguration.Build(), new FakeWebHostEnvironment());
         services.RemoveAll<IDownstreamUserTokenStore>();
+        services.RemoveAll<IOidcSessionStateStore>();
         services.AddSingleton<IDownstreamUserTokenStore>(tokenStore);
+        services.AddSingleton<IOidcSessionStateStore>(tokenStore);
         return services.BuildServiceProvider();
     }
 
@@ -117,12 +119,13 @@ public sealed class OidcTokenPersistenceSecurityTests
     {
         if (includeSessionId)
         {
-            return TestUsers.CreateAuthenticatedUser([new Claim("sub", "user-123")]);
+            return TestUsers.CreateAuthenticatedUser();
         }
 
         return new ClaimsPrincipal(new ClaimsIdentity(
         [
-            new Claim("sub", "user-123")
+            new Claim("sub", "user-123", ClaimValueTypes.String, "https://idp.example.com"),
+            new Claim("iss", "https://idp.example.com")
         ], "test"));
     }
 

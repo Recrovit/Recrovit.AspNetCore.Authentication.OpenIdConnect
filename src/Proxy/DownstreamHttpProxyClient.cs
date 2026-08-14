@@ -40,7 +40,7 @@ public sealed class DownstreamHttpProxyClient(
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         }
 
-        DownstreamProxyUtilities.ForwardHeaders(headers, request.Headers, request.Content?.Headers);
+        DownstreamProxyUtilities.AddHeaders(headers, request.Headers, request.Content?.Headers);
 
         logger.LogInformation(
             "Proxying downstream HTTP request to {DownstreamUri} for API {DownstreamApiName}. Method={Method}, AuthenticatedUser={IsAuthenticated}",

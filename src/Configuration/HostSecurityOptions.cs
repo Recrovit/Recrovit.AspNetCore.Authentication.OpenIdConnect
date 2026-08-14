@@ -29,4 +29,14 @@ public sealed class HostSecurityOptions
     /// Gets the shared path for persisted Data Protection keys used to decrypt encrypted token-cache entries across hosts.
     /// </summary>
     public string? DataProtectionKeysPath { get; init; }
+
+    /// <summary>
+    /// Gets the Data Protection startup validation profile.
+    /// </summary>
+    public DataProtectionSecurityProfile DataProtectionSecurityProfile { get; init; } = DataProtectionSecurityProfile.Standard;
+
+    /// <summary>
+    /// Gets a value indicating whether production-readiness startup validation should also block startup in development environments.
+    /// </summary>
+    public bool RequireProductionReadinessInDevelopment { get; init; }
 }

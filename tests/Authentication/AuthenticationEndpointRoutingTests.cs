@@ -82,9 +82,11 @@ public sealed class AuthenticationEndpointRoutingTests
         builder.WebHost.UseTestServer();
         builder.Configuration.AddInMemoryCollection(TestConfiguration.CreateBaseConfiguration());
         builder.AddRecrovitOpenIdConnectInfrastructure();
-        builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => new InMemoryTokenStore(
+        var tokenStore = new InMemoryTokenStore(
             authenticatedUser ?? TestUsers.CreateAuthenticatedUser(),
-            CreateStoredTokenEntry(authenticatedUser))));
+            CreateStoredTokenEntry(authenticatedUser));
+        builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenStore>(_ => tokenStore));
+        builder.Services.Replace(ServiceDescriptor.Scoped<IOidcSessionStateStore>(_ => tokenStore));
         builder.Services.Replace(ServiceDescriptor.Scoped<IDownstreamUserTokenProvider, StubDownstreamUserTokenProvider>());
 
         var app = builder.Build();

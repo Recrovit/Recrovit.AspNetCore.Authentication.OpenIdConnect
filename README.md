@@ -26,6 +26,7 @@ This package exists to provide that combined host infrastructure as a reusable b
 - Provides downstream access tokens for authenticated users through `IDownstreamUserTokenProvider`.
 - Redirects handled OIDC callback failures such as canceled or access-denied sign-in flows to a safe application path instead of surfacing the raw callback error.
 - Provides reusable downstream HTTP proxy and transport/WebSocket proxy infrastructure for OIDC-enabled hosts.
+- Supports endpoint-level request header forwarding for downstream proxy routes through explicit string-based allowlists.
 - Refreshes expired access tokens through the provider's token endpoint when a refresh token is available.
 - Returns `401` and `403` for API-style and proxy requests instead of redirecting to an interactive login flow.
 - Clears local session state and signals reauthentication when a stored token set is no longer usable.
@@ -73,6 +74,12 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var enforceProductionReadiness = builder.IsRecrovitOpenIdConnectProductionReadinessEnforced();
+if (enforceProductionReadiness)
+{
+    // Configure host-level production-grade dependencies before registering the package.
+}
+
 builder.AddRecrovitOpenIdConnectInfrastructure();
 
 var app = builder.Build();
@@ -114,6 +121,7 @@ Key responsibilities:
 - defines the base path for the built-in authentication endpoints
 - defines the safe redirect path used when a handled OIDC remote callback failure returns to the host
 - optionally names a downstream API that should be used to validate whether the current session is still usable
+- defines the browser-origin and antiforgery protection policy for generic downstream proxy requests through `DownstreamProxyRequestProtection`
 
 ### `Recrovit:OpenIdConnect:Provider`
 
@@ -127,6 +135,7 @@ Key responsibilities:
 
 - identity provider authority
 - OIDC client credentials and certificate-based client authentication
+- token endpoint refresh timeout
 - callback and sign-out paths
 - extra login and identity scopes
 - UserInfo loading behavior
@@ -140,11 +149,38 @@ Each downstream API definition describes:
 
 - `BaseUrl`
 - `Scopes`
+- `ForwardedRequestHeaders`
+- `ForwardedResponseHeaders`
+- `IncludeDefaultForwardedRequestHeaders`
 - `RelativePath`
+- `Disabled`
 
 The catalog is used both for validation and for runtime token access.
 
 At sign-in, the package automatically unions every configured downstream API scope with `Provider:Scopes` so the initial consent surface already covers all configured APIs.
+
+Provider-specific overrides can also be configured under `Recrovit:OpenIdConnect:Providers:<provider>:DownstreamApis`.
+
+Precedence rules:
+
+- the shared `DownstreamApis` section provides the base definition
+- provider-specific entries override only the fields they define
+- provider-specific `Scopes` replaces the shared scope list when the section is present
+- provider-specific `ForwardedRequestHeaders` and `ForwardedResponseHeaders` replace the shared list when the section is present
+- `Disabled: true` removes the downstream API from the effective catalog entirely
+
+Each downstream API definition also supports:
+
+- `Disabled`
+
+Header forwarding defaults:
+
+- the proxy forwards these request headers by default: `Accept`, `Accept-Language`, `Accept-Encoding`, `If-None-Match`, `If-Modified-Since`
+- `IncludeDefaultForwardedRequestHeaders` defaults to `true`
+- set `IncludeDefaultForwardedRequestHeaders: false` to opt out per API
+- there is no wildcard forwarding
+- request headers such as `Authorization`, `Proxy-Authorization`, `Cookie`, `Host`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Content-Length`, hop-by-hop headers, and `Connection`-declared headers are never forwarded even if configured
+- `ForwardedResponseHeaders` extends a built-in safe response allowlist; host-owned CORS and security headers are always suppressed
 
 ## Downstream API Proxy Endpoints
 
@@ -158,6 +194,42 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 app.MapDownstreamApiProxyEndpoints();
 ```
 
+Hosts can also configure immutable per-API claim-header mappings when the endpoints are mapped:
+
+```csharp
+using System.Security.Claims;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
+
+app.MapDownstreamApiProxyEndpoints(options =>
+{
+    options.ForApi("UserInfoApi")
+        .ForwardFirstClaimHeader("X-User-Id", ClaimTypes.NameIdentifier, "sub")
+        .ForwardClaimValuesHeader("X-User-Roles", ClaimTypes.Role);
+});
+```
+
+Hosts can also extend the forwarded incoming request-header allowlist per mapped downstream API:
+
+```csharp
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
+
+app.MapDownstreamApiProxyEndpoints(options =>
+{
+    options.ForApi("UserInfoApi")
+        .ForwardRequestHeaders("X-Correlation-ID", "X-Client-Version");
+});
+```
+
+For custom proxy routes that still use `DownstreamProxyEndpointExecutor.ProxyHttpAsync(...)` or `IDownstreamTransportProxyClient`, the same built-in request-header allowlist can be applied directly on the endpoint:
+
+```csharp
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+app.MapGet("/custom/userinfo/{**path}", Handler)
+    .WithForwardedRequestHeaders("X-Correlation-ID")
+    .AsProxyEndpoint();
+```
+
 This maps a generic route pattern:
 
 - `/downstream/{apiName}`
@@ -167,9 +239,25 @@ Behavior:
 
 - `apiName` is resolved from `DownstreamApiCatalog`
 - the downstream base URL, scopes, and configured `RelativePath` come from the matching `DownstreamApiDefinition`
+- the effective downstream proxy root is the configured `BaseUrl + RelativePath`
+- if `BaseUrl` already contains a path segment, that path remains part of the downstream root and is not replaced by the proxy route path
+- the route path after `/downstream/{apiName}` is appended only within that configured downstream root; attempts to escape it are rejected with `400 Bad Request`
 - the host acquires or refreshes the signed-in user's downstream access token through `IDownstreamUserTokenProvider`
 - the request is forwarded through the built-in downstream HTTP proxy infrastructure
+- the typed downstream proxy `HttpClient` does not auto-follow redirects and does not store downstream cookies
+- request headers are forwarded from the built-in default request-header set, plus any extra names listed in the matched API definition's `ForwardedRequestHeaders`
+- endpoint-level `ForwardRequestHeaders(...)` values extend that request-header allowlist only for the mapped downstream proxy endpoint
+- direct `WithForwardedRequestHeaders(...)` metadata applies the same allowlist behavior to custom proxy endpoints outside the generic `/downstream/{apiName}` pattern
+- server-generated claim headers remove any same-named client value before the authenticated user's claim-derived value is applied
+- downstream `Location` headers are rewritten back to the public proxy route only when the redirect target stays on the configured downstream origin and under the configured downstream root
+- cookie-authenticated downstream proxy requests are protected against cross-site browser initiation by default, and unsafe methods also require antiforgery validation
 - API-style authorization behavior is preserved, so unauthorized proxy requests return `401` or `403` instead of redirecting to login
+
+Security and forwarding notes:
+
+- endpoint-level request-header forwarding uses the same forbidden-header validation as configuration-based `ForwardedRequestHeaders`
+- request headers such as `Authorization`, `Cookie`, `Host`, `Forwarded`, `Proxy-Authorization`, `Content-Length`, hop-by-hop headers, and `Connection`-declared headers remain blocked even when explicitly requested
+- claim-derived protected headers still override spoofed incoming request-header values with the same name
 
 This capability is intentionally generic. It is useful for BFF-style hosts, server-proxy architectures, and any application that wants to expose downstream APIs through a cookie-authenticated OIDC host without re-implementing proxy routing.
 
@@ -183,6 +271,9 @@ Example:
         "UserInfoApi": {
           "BaseUrl": "https://graph.microsoft.com/",
           "Scopes": [ "openid", "profile", "email", "User.Read" ],
+          "IncludeDefaultForwardedRequestHeaders": true,
+          "ForwardedRequestHeaders": [ "Accept", "If-None-Match" ],
+          "ForwardedResponseHeaders": [ "X-Trace-Id" ],
           "RelativePath": "oidc/userinfo"
         }
       }
@@ -197,6 +288,56 @@ With this configuration:
 - `GET /downstream/UserInfoApi/some/extra/path?x=1` appends `some/extra/path?x=1` after the configured route prefix
 - request bodies are forwarded for the supported HTTP methods, including `POST`, `PUT`, `PATCH`, and `DELETE`
 
+For example, if `BaseUrl` is `https://api.example.com/gateway` and `RelativePath` is `session/check`, the effective downstream root is `https://api.example.com/gateway/session/check`. Proxy route suffixes are appended under that root, and traversal-style inputs that would resolve outside it are rejected before any outbound request is created.
+
+Upgrade note for 10.2.0: downstream proxy path validation is stricter than earlier versions. The proxy route suffix cannot escape the effective `BaseUrl + RelativePath` root, and absolute paths, scheme-relative paths, dot-segment traversal, malformed percent-encoding, and multi-pass encoded traversal are rejected with `400 Bad Request`.
+
+### Downstream Proxy Request Protection
+
+Starting with 10.2.0, the host options include `Recrovit:OpenIdConnect:Host:DownstreamProxyRequestProtection` for the generic downstream proxy surface.
+
+Default behavior:
+
+- HTTP requests allow only `Sec-Fetch-Site: same-origin` by default
+- HTTP `POST`, `PUT`, `PATCH`, `DELETE`, and any other unsafe proxy methods also require a valid antiforgery token
+- WebSocket proxy handshakes require a single non-`null` `Origin` header that matches the host origin
+- `Sec-Fetch-Site` is the primary signal
+- `same-site` is rejected unless `AllowSameSite` is explicitly enabled
+- `Sec-Fetch-Site: none` is rejected in strict mode
+- when Fetch Metadata headers are unavailable, the host can fall back to a same-origin or explicitly allowed `Origin` header, or to a configured custom request header
+
+Recommended frontend behavior for compatibility paths:
+
+- for browser-based same-origin calls, let the browser send `Sec-Fetch-Site` naturally
+- for cookie-authenticated unsafe calls, send the antiforgery token expected by the host
+- for older clients that do not send Fetch Metadata, send a same-origin `Origin` header when possible
+- if neither header is available, configure a custom header such as `X-Recrovit-Proxy-Intent` and send the expected value from the trusted frontend
+- for non-browser WebSocket clients, enable `AllowMissingWebSocketOrigin` only when that compatibility path is actually required
+
+Example:
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Host": {
+        "DownstreamProxyRequestProtection": {
+          "Mode": "FetchMetadataFirst",
+          "AllowSameSite": false,
+          "AllowedHttpOrigins": [ "https://app.example.com" ],
+          "AllowedWebSocketOrigins": [ "https://app.example.com" ],
+          "AllowMissingWebSocketOrigin": false,
+          "CustomHeaderName": "X-Recrovit-Proxy-Intent",
+          "CustomHeaderValue": "same-site"
+        }
+      }
+    }
+  }
+}
+```
+
+This protection is a browser-request defense for the generic proxy surface. It does not replace endpoint authorization, and the unsafe-method path assumes the host already exposes an antiforgery token issuance mechanism for its frontend.
+
 ### `Recrovit:OpenIdConnect:TokenCache`
 
 Bound to `TokenCacheOptions`.
@@ -204,8 +345,28 @@ Bound to `TokenCacheOptions`.
 Key responsibilities:
 
 - cache key prefix for encrypted stored user tokens
-  cache entries are scoped separately for OIDC session tokens and per-API access tokens
+- shared HMAC secret for deriving non-reversible session cache identifiers from provider, issuer, subject, and local session metadata
+- deployment mode, which declares whether refresh coordination is expected to remain single-instance or span multiple nodes
 - refresh skew, which controls how early token refresh starts before access token expiration
+- refresh lock lease duration for session-scoped refresh coordination
+
+`CacheKeyHmacSecret` is a compatibility default for local development only. Production deployments should always override it with a deployment-specific secret.
+
+Use these rules for `CacheKeyHmacSecret`:
+
+- generate it from at least 32 random bytes
+- keep one unique value per deployment
+- use the same value on every node of the same multi-instance deployment
+- prefer a unique value even for single-instance deployments
+- do not commit it to source control
+- load it from a secret store or from configuration backed by an environment variable such as `Recrovit__OpenIdConnect__TokenCache__CacheKeyHmacSecret`
+
+`DeploymentMode` defaults to `SingleInstance`.
+
+- Use `SingleInstance` for development and simple one-node hosts that use the package defaults.
+- Use `MultiInstance` only when the host replaces both `IOidcSessionRefreshLockProvider` and `IOidcSessionStateStore`.
+- A multi-instance refresh lock provider must coordinate one authenticated session across nodes for the whole lease duration.
+- A multi-instance session state store must provide atomic cross-node compare-and-swap semantics for the complete session aggregate.
 
 ### `Recrovit:OpenIdConnect:Infrastructure`
 
@@ -215,15 +376,18 @@ Key responsibilities:
 
 - enables forwarded header processing when the host is behind a trusted proxy
 - defines the trusted reverse proxy IP addresses and networks that may supply forwarded headers
-- configures a shared file-system location for Data Protection keys
+- configures legacy shared file-system persistence for Data Protection keys
+- selects the Data Protection startup validation profile
 
 `DataProtectionKeysPath` is an optional path setting, not a separate on/off switch. It is the shared directory used by ASP.NET Core Data Protection to persist encryption keys. Yes, the application writes key files into this directory.
 
 If you set it, the package persists Data Protection keys in that directory. If you omit it, ASP.NET Core falls back to its default key storage behavior for the current environment.
 
-Use it when you need authentication cookies and encrypted token-cache entries to remain readable across restarts or across multiple app instances. In production, this package requires `DataProtectionKeysPath` to be configured so all instances can decrypt the same protected data consistently.
+Use it when you need authentication cookies and encrypted token-cache entries to remain readable across restarts or across multiple app instances. In production, this package requires an explicit shared Data Protection key repository, which can come from `DataProtectionKeysPath` or from host-level Data Protection configuration.
 
-In development or simple single-instance local runs, you can usually omit it. In production, treat it as required and point it to a persistent shared location such as a mounted volume or network share.
+In development or simple single-instance local runs, you can usually omit it. In production, treat an explicit shared key repository as required. For new hosts, prefer configuring Data Protection directly through the new callback overload or host-level `services.AddDataProtection()` setup.
+
+`DataProtectionSecurityProfile` defaults to `Standard`. Set it to `Hardened` to require explicit application isolation and key-ring encryption when the host starts in production.
 
 ## Minimal Configuration Example
 
@@ -247,13 +411,22 @@ In development or simple single-instance local runs, you can usually omit it. In
           "ClientId": "client-id",
           "ClientAuthenticationMethod": "ClientSecretPost",
           "ClientSecret": "client-secret",
+          "TokenEndpointTimeout": "00:00:30",
           "Scopes": [ "openid", "profile", "offline_access" ],
           "CallbackPath": "/signin-oidc",
           "SignedOutCallbackPath": "/signout-callback-oidc",
           "RemoteSignOutPath": "/signout-oidc",
           "SignedOutRedirectPath": "/",
           "GetClaimsFromUserInfoEndpoint": true,
-          "RequireHttpsMetadata": true
+          "RequireHttpsMetadata": true,
+          "DownstreamApis": {
+            "SessionValidationApi": {
+              "RelativePath": "session/provider-check"
+            },
+            "LegacyApi": {
+              "Disabled": true
+            }
+          }
         }
       },
       "DownstreamApis": {
@@ -261,20 +434,161 @@ In development or simple single-instance local runs, you can usually omit it. In
           "BaseUrl": "https://api.example.com",
           "Scopes": [ "api.scope" ],
           "RelativePath": "session/check"
+        },
+        "LegacyApi": {
+          "BaseUrl": "https://legacy.example.com",
+          "Scopes": [ "legacy.read" ],
+          "RelativePath": "legacy"
         }
       },
       "TokenCache": {
         "CacheKeyPrefix": "oidc-user-token-cache",
+        "CacheKeyHmacSecret": "<load-from-secret-store-or-environment>",
+        "DeploymentMode": "SingleInstance",
         "RefreshBeforeExpirationSeconds": 60
       },
       "Infrastructure": {
         "ForwardedHeadersEnabled": false,
-        "DataProtectionKeysPath": "/shared/dpkeys"
+        "DataProtectionKeysPath": "/shared/dpkeys",
+        "DataProtectionSecurityProfile": "Standard"
       }
     }
   }
 }
 ```
+
+## Data Protection Configuration
+
+The package uses ASP.NET Core Data Protection for authentication cookies and for encrypting distributed token-cache payloads. Existing applications can keep using `Recrovit:OpenIdConnect:Infrastructure:DataProtectionKeysPath` without code changes.
+
+For new applications, prefer configuring Data Protection explicitly by using either host-level `services.AddDataProtection()` or the `AddOidcAuthenticationInfrastructure(...)` callback overload:
+
+```csharp
+using System.IO;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+var keyDirectory = new DirectoryInfo("/shared/dpkeys");
+
+builder.Services.AddOidcAuthenticationInfrastructure(
+    builder.Configuration,
+    builder.Environment,
+    dataProtection => dataProtection
+        .SetApplicationName("MyCompany.MyApplication.Production")
+        .PersistKeysToFileSystem(keyDirectory));
+```
+
+Use the same application name across all instances of the same deployed application. Use different application names for different applications and different environments. The application name improves isolation, but it does not replace the need for separate key repositories when you need strong security separation.
+
+### Single-Instance Or Simple IIS Hosts
+
+For backward-compatible, simple deployments, `DataProtectionKeysPath` remains supported:
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Infrastructure": {
+        "DataProtectionKeysPath": "C:\\Auth\\dpkeys"
+      }
+    }
+  }
+}
+```
+
+This is still valid in `Standard` mode. In production, if the key ring is persisted explicitly but no key-ring encryption is configured, the package logs a warning and continues for backward compatibility.
+
+### Multi-Instance Deployments
+
+Multi-instance hosts should use a shared Data Protection key repository and a shared `IDistributedCache` backend. The shared key repository can be configured through `DataProtectionKeysPath`, through the callback overload, or through host-level `services.AddDataProtection()` registration before the OIDC package is added.
+
+### Certificate-Based Key-Ring Encryption
+
+```csharp
+using System.IO;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+var keyDirectory = new DirectoryInfo("/shared/dpkeys");
+var keyRingCertificate = LoadDataProtectionCertificate();
+
+builder.Services.AddOidcAuthenticationInfrastructure(
+    builder.Configuration,
+    builder.Environment,
+    dataProtection => dataProtection
+        .SetApplicationName("MyCompany.MyApplication.Production")
+        .PersistKeysToFileSystem(keyDirectory)
+        .ProtectKeysWithCertificate(keyRingCertificate));
+```
+
+Keep old decryption certificates available during certificate rotation until every active key ring entry that depends on them has aged out or been re-encrypted.
+
+### Windows DPAPI
+
+```csharp
+using System.IO;
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+var keyDirectory = new DirectoryInfo(@"C:\Auth\dpkeys");
+
+builder.Services.AddOidcAuthenticationInfrastructure(
+    builder.Configuration,
+    builder.Environment,
+    dataProtection => dataProtection
+        .SetApplicationName("MyCompany.MyApplication.Production")
+        .PersistKeysToFileSystem(keyDirectory)
+        .ProtectKeysWithDpapi());
+```
+
+### External KMS Or Provider-Specific Storage
+
+The base package does not reference Azure, AWS, Vault, or any other provider SDK. Install the provider-specific ASP.NET Core Data Protection extensions in the host application, then call them from the callback or from host-level Data Protection registration:
+
+```csharp
+using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
+
+builder.Services.AddOidcAuthenticationInfrastructure(
+    builder.Configuration,
+    builder.Environment,
+    dataProtection => dataProtection
+        .SetApplicationName("MyCompany.MyApplication.Production")
+        .PersistKeysToExternalStorage(...)
+        .ProtectKeysWithExternalKeyManagementSystem(...));
+```
+
+### Standard And Hardened Profiles
+
+`Standard` preserves existing behavior:
+
+- `DataProtectionKeysPath` remains supported
+- explicit application isolation is recommended but not required
+- explicit key-ring encryption is recommended but not required
+- production-readiness validation runs only in the `Production` environment unless explicitly enabled for `Development`
+
+`Hardened` adds startup validation:
+
+- production requires explicit application isolation through `SetApplicationName(...)`
+- production requires key-ring encryption when an explicit repository is configured
+- development logs warnings instead of blocking startup
+
+To test the full production startup requirements in a local `Development` environment, enable the infrastructure opt-in below. This is an environment/configuration switch, not a `Debug` build switch.
+
+Example:
+
+```json
+{
+  "Recrovit": {
+    "OpenIdConnect": {
+      "Infrastructure": {
+        "DataProtectionSecurityProfile": "Hardened",
+        "RequireProductionReadinessInDevelopment": true
+      }
+    }
+  }
+}
+```
+
+With `RequireProductionReadinessInDevelopment: true`, the same startup enforcement used in `Production` also blocks application startup in `Development`, including HTTPS endpoint validation, trusted forwarded-header proxy requirements, shared Data Protection key repository requirements, and shared distributed cache requirements.
+
+Use separate certificates for OIDC client authentication and Data Protection key-ring encryption whenever possible. They serve different security purposes and should not share the same private key by default.
 
 ## Certificate-Based Client Authentication
 
@@ -299,6 +613,7 @@ If you instantiate `OidcDownstreamUserTokenProvider` directly, use the public co
           "Authority": "https://idp.example.com",
           "ClientId": "client-id",
           "ClientAuthenticationMethod": "PrivateKeyJwt",
+          "TokenEndpointTimeout": "00:00:30",
           "ClientCertificate": {
             "Source": "File",
             "File": {
@@ -331,6 +646,7 @@ Windows hosts can also load the certificate from the Windows Certificate Store.
           "Authority": "https://idp.example.com",
           "ClientId": "client-id",
           "ClientAuthenticationMethod": "PrivateKeyJwt",
+          "TokenEndpointTimeout": "00:00:30",
           "ClientCertificate": {
             "Source": "WindowsStore",
             "Store": {
@@ -459,7 +775,9 @@ await fetch("/authentication/logout?returnUrl=%2F", {
 
 When the OIDC sign-in ticket is received, the package stores the OIDC session token set in an external authenticated session token store through `IDownstreamUserTokenStore`.
 
-The default distributed token store encrypts the cached refresh token, ID token, and per-API access token payloads with ASP.NET Core Data Protection before writing them to the cache backend.
+The default distributed token store encrypts a single versioned session payload with ASP.NET Core Data Protection before writing it to the cache backend. That payload contains the session refresh token, ID token, and any cached per-API access tokens for the authenticated local session.
+
+Starting with 10.2.0, the default cache representation uses a `v2` session aggregate and HMAC-derived session cache keys. Cache entries written by earlier package versions used a different payload shape and raw issuer, subject, and session-id key segments, so existing active token-cache entries are not treated as reusable 10.2.0 state. During upgrade, expect affected users to rebuild token state through normal reauthentication.
 
 After storage, the package removes the tokens from the authentication properties before they remain in the authentication cookie. In practice, this means the host keeps the sign-in cookie for local session state, while session tokens and downstream API access tokens are retained separately and scoped to that specific local authenticated session.
 
@@ -477,7 +795,9 @@ At runtime:
 - if the API token is near expiration or missing, the package attempts a refresh-token exchange for that API scope set
 - if no stored session token set exists, reauthentication is required
 - if no refresh token is available for API token renewal, reauthentication is required
-- if the token endpoint fails with a recoverable user-facing auth failure such as `invalid_grant`, reauthentication is required
+- each logical refresh calls the token endpoint at most once; compare-and-swap retries reuse the same in-memory refresh result instead of repeating the refresh-token exchange
+- if compare-and-swap detects a newer stored session aggregate, the package rereads that aggregate and merges only while the source refresh token still matches; a deleted session or rotated source token is never recreated from an older refresh result
+- if the token endpoint fails with `invalid_grant`, the package rereads the current session state before requiring reauthentication; a concurrent successful refresh is reused when it already produced a usable token
 - if token refresh fails because of server-side or transport issues, the request is treated as a service failure
 
 When the package decides the user must sign in again, it clears the local session and writes:
@@ -488,6 +808,22 @@ When the package decides the user must sign in again, it clears the local sessio
 This behavior is handled through `OidcSessionCleanupService`.
 
 The distributed token cache and refresh coordination are session-scoped, not just user-scoped. Multiple concurrent browser sessions for the same subject therefore keep isolated token state, refresh locks, logout cleanup, and reauthentication behavior.
+
+Within one application process, the package serializes every state-changing operation for the same provider, issuer, subject, and local session ID. Sign-in persistence, API-token writes, refresh rotation, logout, session cleanup, and corrupted-payload deletion therefore use one process-wide session lock even though the token store itself is scoped. Refresh holds this local lock through the token endpoint exchange and persistence; logout removes the token aggregate and clears the local cookie before releasing it.
+
+This local coordination is process-local only. Multi-instance hosts still need a cross-node `IOidcSessionRefreshLockProvider` and an `IOidcSessionStateStore` with atomic cross-node compare-and-swap semantics.
+
+Refresh persistence is modeled as a versioned compare-and-swap update of the complete session token payload. This prevents an older refresh result from overwriting a newer refresh token when token rotation is enabled and prevents a completed refresh from restoring state deleted by logout.
+
+Cache keys no longer contain raw issuer, subject, or session identifiers. The package derives a stable HMAC-based session fingerprint from that metadata and uses it as the external cache key segment instead.
+
+The built-in `DistributedDownstreamUserTokenStore` and `UserRefreshLockProvider` are intended as safe defaults for development and single-instance hosts. The in-process `UserRefreshLockProvider` relies on `SemaphoreSlim` ownership and therefore does not expire its local lease by time. These defaults do not by themselves provide production-safe cross-node compare-and-swap or cross-node refresh lease guarantees.
+
+### Custom Token Stores
+
+Starting with 10.2.0, custom token stores used with `OidcDownstreamUserTokenProvider` must implement both `IDownstreamUserTokenStore` and `IOidcSessionStateStore`. This applies even for single-instance hosts when the token provider is instantiated directly, because refresh persistence now works against a complete versioned session aggregate.
+
+For multi-instance deployments, the `IOidcSessionStateStore.TryCompareAndSwapSessionStateAsync(...)` implementation must provide atomic compare-and-swap semantics across nodes. A best-effort read-then-write sequence over a shared cache is not sufficient for refresh-token rotation safety.
 
 ## Session Validation
 
@@ -585,15 +921,22 @@ This makes API and proxy consumers receive status codes instead of browser-orien
 
 The package validates key production requirements during startup.
 
-In production:
+Production checklist:
 
-- a shared distributed cache is required for user token storage
-- `AddDistributedMemoryCache` is not sufficient for multi-instance production use
-- `HostSecurityOptions.DataProtectionKeysPath` must be configured so Data Protection keys are shared
+- replace the development in-memory distributed cache with a shared `IDistributedCache` backend
+- configure an explicit shared Data Protection key repository through `DataProtectionKeysPath`, the callback overload, or host-level Data Protection setup
+- use a deployment-specific `TokenCacheOptions.CacheKeyHmacSecret` generated from at least 32 random bytes
+- load token-cache secrets from a secret store or environment-backed configuration, not source-controlled configuration
+- keep the same HMAC secret and Data Protection application name across all nodes of the same deployment
+- configure trusted forwarded-header proxies or networks when forwarded headers are enabled
 
-`AddRecrovitOpenIdConnectInfrastructure()` registers `AddDistributedMemoryCache()` as a safe default for development and simple single-instance runs. Production hosts should replace that default with a shared `IDistributedCache` backend so encrypted token-cache entries remain available across restarts and across multiple application instances.
+`AddRecrovitOpenIdConnectInfrastructure()` registers `AddDistributedMemoryCache()` as a safe default for development and simple single-instance runs. Production hosts should replace it so encrypted token-cache entries remain available across restarts and across multiple application instances.
 
-The package validates that the effective sign-in scope set is not empty and that each configured downstream API declares a non-empty scope list.
+`TokenCacheOptions.DeploymentMode` defaults to `SingleInstance`. If it is set to `MultiInstance`, startup fails fast unless the host replaces both the default in-process `IOidcSessionRefreshLockProvider` and the default non-atomic `IOidcSessionStateStore`. See the custom token store requirements above for the baseline `IOidcSessionStateStore` contract that applies before the extra multi-instance atomicity requirement.
+
+When `DataProtectionSecurityProfile` is set to `Hardened`, production startup also requires explicit Data Protection application isolation through `SetApplicationName(...)` and key-ring encryption when an explicit repository is configured.
+
+The package also validates that the effective sign-in scope set is not empty and that each configured downstream API declares a non-empty scope list. If production still uses the built-in development HMAC default, startup logs a warning without logging the secret value.
 
 ## SQL Server Distributed Cache Example
 
@@ -611,7 +954,7 @@ builder.Services.AddDistributedSqlServerCache(options =>
     options.ConnectionString = builder.Configuration.GetConnectionString("RecrovitAuthCache")
         ?? throw new InvalidOperationException("Connection string 'RecrovitAuthCache' is required.");
     options.SchemaName = "dbo";
-    options.TableName = "OidcTokenCache";
+    options.TableName = "RgfOidcTokenCache";
 });
 
 builder.AddRecrovitOpenIdConnectInfrastructure();
@@ -621,7 +964,7 @@ Create the SQL cache table before running the host:
 
 ```bash
 dotnet tool install --global dotnet-sql-cache
-dotnet sql-cache create "Server=.;Database=RecrovitAuth;Trusted_Connection=True;TrustServerCertificate=True" dbo OidcTokenCache
+dotnet sql-cache create "Server=.;Database=RecrovitAuth;Trusted_Connection=True;TrustServerCertificate=True" dbo RgfOidcTokenCache
 ```
 
 If your environment uses different naming conventions, database separation rules, or SQL authentication settings, adjust the connection string, schema, and table name to match your production standards.

@@ -49,4 +49,62 @@ public sealed class OidcAuthenticationOptions
     /// Gets the application-relative path used when an OIDC remote callback returns with a handled user-facing failure.
     /// </summary>
     public string RemoteFailureRedirectPath { get; init; } = "/";
+
+    /// <summary>
+    /// Gets the protection policy applied to cookie-authenticated downstream proxy requests.
+    /// </summary>
+    [Required]
+    public DownstreamProxyRequestProtectionOptions DownstreamProxyRequestProtection { get; init; } = new();
+}
+
+/// <summary>
+/// Defines the host-facing protection policy for cookie-authenticated downstream proxy requests.
+/// </summary>
+public sealed class DownstreamProxyRequestProtectionOptions
+{
+    /// <summary>
+    /// Gets the primary evaluation strategy used for downstream proxy request protection.
+    /// </summary>
+    public ProxyRequestProtectionMode Mode { get; init; } = ProxyRequestProtectionMode.FetchMetadataFirst;
+
+    /// <summary>
+    /// Gets a value indicating whether <c>Sec-Fetch-Site: same-site</c> is accepted for HTTP requests.
+    /// </summary>
+    public bool AllowSameSite { get; init; }
+
+    /// <summary>
+    /// Gets the optional request header name accepted as an explicit compatibility signal when browser metadata headers are unavailable.
+    /// </summary>
+    public string? CustomHeaderName { get; init; }
+
+    /// <summary>
+    /// Gets the optional request header value expected for <see cref="CustomHeaderName"/>.
+    /// </summary>
+    public string? CustomHeaderValue { get; init; }
+
+    /// <summary>
+    /// Gets the explicitly trusted origins that may satisfy the HTTP origin fallback check.
+    /// </summary>
+    public string[] AllowedHttpOrigins { get; init; } = [];
+
+    /// <summary>
+    /// Gets the explicitly trusted origins that may initiate WebSocket proxy handshakes.
+    /// </summary>
+    public string[] AllowedWebSocketOrigins { get; init; } = [];
+
+    /// <summary>
+    /// Gets a value indicating whether WebSocket requests without an <c>Origin</c> header are accepted.
+    /// </summary>
+    public bool AllowMissingWebSocketOrigin { get; init; }
+}
+
+/// <summary>
+/// Defines the supported protection modes for downstream proxy requests.
+/// </summary>
+public enum ProxyRequestProtectionMode
+{
+    /// <summary>
+    /// Uses <c>Sec-Fetch-Site</c> as the primary request signal and falls back to origin or a configured custom header when Fetch Metadata headers are unavailable.
+    /// </summary>
+    FetchMetadataFirst = 0
 }

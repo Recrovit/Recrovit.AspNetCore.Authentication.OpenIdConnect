@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authorization.Policy;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Caching.Distributed;
@@ -13,24 +14,31 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Authentication;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
+using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Text.Encodings.Web;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Testing;
 
-internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
+internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore, IOidcSessionStateStore
 {
     private readonly Dictionary<string, StoredOidcSessionTokenSet> sessionTokenSets = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CachedDownstreamApiTokenEntry> apiTokens = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> concurrencyVersions = new(StringComparer.Ordinal);
 
     public StoredOidcSessionTokenSet? StoredSessionTokenSet { get; private set; }
 
     public IReadOnlyDictionary<string, CachedDownstreamApiTokenEntry> ApiTokens => apiTokens;
 
     public bool RemoveCalled { get; private set; }
+
+    public long? RemoveSequence { get; private set; }
 
     public List<string> RemovedSessionKeys { get; } = [];
 
@@ -57,7 +65,7 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
         {
             foreach (var entry in initialApiTokens)
             {
-                apiTokens[$"{CreateSessionKey(initialUser)}|{entry.Key}"] = entry.Value;
+                apiTokens[$"{CreateSessionKey(initialUser)}|{NormalizeInitialApiKey(entry.Key)}"] = entry.Value;
             }
         }
     }
@@ -68,12 +76,39 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
         return Task.FromResult(tokenSet);
     }
 
+    public Task<VersionedOidcSessionState?> GetSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+    {
+        var sessionKey = CreateSessionKey(user);
+        sessionTokenSets.TryGetValue(sessionKey, out var tokenSet);
+        var matchingApiTokens = apiTokens
+            .Where(entry => entry.Key.StartsWith($"{sessionKey}|", StringComparison.Ordinal))
+            .ToDictionary(
+                entry => entry.Key[(sessionKey.Length + 1)..],
+                entry => Clone(entry.Value),
+                StringComparer.Ordinal);
+        if (tokenSet is null && matchingApiTokens.Count == 0)
+        {
+            return Task.FromResult<VersionedOidcSessionState?>(null);
+        }
+
+        concurrencyVersions.TryGetValue(sessionKey, out var version);
+        version ??= "v0";
+        return Task.FromResult<VersionedOidcSessionState?>(new VersionedOidcSessionState(
+            version,
+            new OidcSessionState
+            {
+                SessionTokens = tokenSet is null ? null : Clone(tokenSet),
+                ApiTokens = matchingApiTokens
+            }));
+    }
+
     public Task StoreSessionTokenSetAsync(ClaimsPrincipal user, StoredOidcSessionTokenSet tokenSet, CancellationToken cancellationToken)
     {
         StoredSessionTokenSet = tokenSet;
         var sessionKey = CreateSessionKey(user);
         StoredSessionKeys.Add(sessionKey);
         sessionTokenSets[sessionKey] = tokenSet;
+        concurrencyVersions[sessionKey] = Guid.NewGuid().ToString("n");
         return Task.CompletedTask;
     }
 
@@ -87,6 +122,51 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
         return Task.FromResult(entry);
     }
 
+    public Task<bool> TryCompareAndSwapSessionStateAsync(
+        ClaimsPrincipal user,
+        string? expectedVersion,
+        OidcSessionState newState,
+        CancellationToken cancellationToken)
+    {
+        var sessionKey = CreateSessionKey(user);
+        var currentStateExists = sessionTokenSets.ContainsKey(sessionKey) || apiTokens.Keys.Any(key => key.StartsWith($"{sessionKey}|", StringComparison.Ordinal));
+        concurrencyVersions.TryGetValue(sessionKey, out var currentVersion);
+        if (!currentStateExists)
+        {
+            if (expectedVersion is not null)
+            {
+                return Task.FromResult(false);
+            }
+        }
+        else if (!string.Equals(currentVersion ?? "v0", expectedVersion, StringComparison.Ordinal))
+        {
+            return Task.FromResult(false);
+        }
+
+        if (newState.SessionTokens is null)
+        {
+            sessionTokenSets.Remove(sessionKey);
+        }
+        else
+        {
+            sessionTokenSets[sessionKey] = Clone(newState.SessionTokens);
+            StoredSessionTokenSet = Clone(newState.SessionTokens);
+        }
+
+        foreach (var apiKey in apiTokens.Keys.Where(key => key.StartsWith($"{sessionKey}|", StringComparison.Ordinal)).ToArray())
+        {
+            apiTokens.Remove(apiKey);
+        }
+
+        foreach (var entry in newState.ApiTokens)
+        {
+            apiTokens[$"{sessionKey}|{entry.Key}"] = Clone(entry.Value);
+        }
+
+        concurrencyVersions[sessionKey] = Guid.NewGuid().ToString("n");
+        return Task.FromResult(true);
+    }
+
     public Task StoreApiTokenAsync(
         ClaimsPrincipal user,
         string downstreamApiName,
@@ -95,15 +175,21 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
         CancellationToken cancellationToken)
     {
         apiTokens[CreateApiKey(user, downstreamApiName, scopes)] = tokenEntry;
+        concurrencyVersions[CreateSessionKey(user)] = Guid.NewGuid().ToString("n");
         return Task.CompletedTask;
     }
+
+    public Task DeleteSessionStateAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+        => RemoveAsync(user, cancellationToken);
 
     public Task RemoveAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
     {
         RemoveCalled = true;
+        RemoveSequence = TestOperationSequence.Next();
         var sessionKey = CreateSessionKey(user);
         RemovedSessionKeys.Add(sessionKey);
         sessionTokenSets.Remove(sessionKey);
+        concurrencyVersions.Remove(sessionKey);
         foreach (var apiKey in apiTokens.Keys.Where(key => key.StartsWith($"{sessionKey}|", StringComparison.Ordinal)).ToArray())
         {
             apiTokens.Remove(apiKey);
@@ -113,7 +199,55 @@ internal sealed class InMemoryTokenStore : IDownstreamUserTokenStore
 
     private static string CreateApiKey(ClaimsPrincipal user, string downstreamApiName, IReadOnlyCollection<string> scopes)
     {
-        return $"{CreateSessionKey(user)}|{downstreamApiName}:{string.Join(" ", scopes.OrderBy(scope => scope, StringComparer.Ordinal))}";
+        var normalizedScopes = scopes
+            .Where(scope => !string.IsNullOrWhiteSpace(scope))
+            .Select(scope => scope.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(scope => scope, StringComparer.Ordinal);
+        var serializedScopes = string.Join(" ", normalizedScopes);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(serializedScopes));
+        return $"{CreateSessionKey(user)}|{downstreamApiName}:{Convert.ToHexString(hash)}";
+    }
+
+    private static string NormalizeInitialApiKey(string key)
+    {
+        var separatorIndex = key.IndexOf(':', StringComparison.Ordinal);
+        if (separatorIndex < 0)
+        {
+            return key;
+        }
+
+        var apiName = key[..separatorIndex];
+        var suffix = key[(separatorIndex + 1)..];
+        if (suffix.Length == 64 && suffix.All(Uri.IsHexDigit))
+        {
+            return key;
+        }
+
+        var scopes = suffix.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var normalizedScopes = scopes.Length == 0 ? [suffix] : scopes;
+        var serializedScopes = string.Join(" ", normalizedScopes.OrderBy(scope => scope, StringComparer.Ordinal));
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(serializedScopes));
+        return $"{apiName}:{Convert.ToHexString(hash)}";
+    }
+
+    private static StoredOidcSessionTokenSet Clone(StoredOidcSessionTokenSet tokenSet)
+    {
+        return new StoredOidcSessionTokenSet
+        {
+            RefreshToken = tokenSet.RefreshToken,
+            IdToken = tokenSet.IdToken,
+            ExpiresAtUtc = tokenSet.ExpiresAtUtc
+        };
+    }
+
+    private static CachedDownstreamApiTokenEntry Clone(CachedDownstreamApiTokenEntry tokenEntry)
+    {
+        return new CachedDownstreamApiTokenEntry
+        {
+            AccessToken = tokenEntry.AccessToken,
+            ExpiresAtUtc = tokenEntry.ExpiresAtUtc
+        };
     }
 
     private static string CreateSessionKey(ClaimsPrincipal user)
@@ -181,8 +315,63 @@ internal sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
     public override DateTimeOffset GetUtcNow() => utcNow;
 }
 
-internal sealed class RecordingDownstreamHttpProxyClient(HttpResponseMessage response) : IDownstreamHttpProxyClient
+internal sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider
 {
+    private long utcTicks = utcNow.UtcTicks;
+
+    public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref utcTicks), TimeSpan.Zero);
+
+    public void Advance(TimeSpan timeSpan)
+    {
+        Interlocked.Add(ref utcTicks, timeSpan.Ticks);
+    }
+}
+
+internal sealed class RecordingHttpClientFactory(Func<string, HttpClient> clientFactory) : IHttpClientFactory
+{
+    public string? LastClientName { get; private set; }
+
+    public int CreateClientCount { get; private set; }
+
+    public HttpClient CreateClient(string name)
+    {
+        CreateClientCount++;
+        LastClientName = name;
+        return clientFactory(name);
+    }
+}
+
+internal sealed class FixedLeaseRefreshLockProvider(string ownerToken, DateTimeOffset expiresAtUtc) : IOidcSessionRefreshLockProvider
+{
+    public Task<IOidcSessionRefreshLockLease> AcquireAsync(ClaimsPrincipal user, CancellationToken cancellationToken)
+        => Task.FromResult<IOidcSessionRefreshLockLease>(new Lease(ownerToken, expiresAtUtc));
+
+    private sealed class Lease(string ownerToken, DateTimeOffset expiresAtUtc) : IOidcSessionRefreshLockLease
+    {
+        public string OwnerToken { get; } = ownerToken;
+
+        public DateTimeOffset ExpiresAtUtc { get; } = expiresAtUtc;
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+}
+
+internal sealed class RecordingDownstreamHttpProxyClient : IDownstreamHttpProxyClient
+{
+    private readonly Func<HttpResponseMessage> responseFactory;
+
+    public RecordingDownstreamHttpProxyClient(HttpResponseMessage response)
+        : this(() => response)
+    {
+    }
+
+    public RecordingDownstreamHttpProxyClient(Func<HttpResponseMessage> responseFactory)
+    {
+        this.responseFactory = responseFactory;
+    }
+
+    public int CallCount { get; private set; }
+
     public string? DownstreamApiName { get; private set; }
 
     public HttpMethod? Method { get; private set; }
@@ -195,6 +384,9 @@ internal sealed class RecordingDownstreamHttpProxyClient(HttpResponseMessage res
 
     public string? ContentType { get; private set; }
 
+    public IReadOnlyDictionary<string, string[]> ContentHeaders { get; private set; } =
+        new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+
     public string? ContentBody { get; private set; }
 
     public async Task<HttpResponseMessage> SendAsync(
@@ -206,16 +398,52 @@ internal sealed class RecordingDownstreamHttpProxyClient(HttpResponseMessage res
         IEnumerable<KeyValuePair<string, StringValues>> headers,
         CancellationToken cancellationToken)
     {
+        CallCount++;
         DownstreamApiName = downstreamApiName;
         Method = method;
         PathAndQuery = pathAndQuery;
         User = user;
         Headers = headers.ToArray();
         ContentType = content?.Headers.ContentType?.ToString();
+        ContentHeaders = content?.Headers.ToDictionary(
+            static header => header.Key,
+            static header => header.Value.ToArray(),
+            StringComparer.OrdinalIgnoreCase)
+            ?? new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         ContentBody = content is null
             ? null
             : await content.ReadAsStringAsync(cancellationToken);
-        return response;
+        return responseFactory();
+    }
+}
+
+internal sealed class StubRequestBodyDetectionFeature(bool canHaveBody) : IHttpRequestBodyDetectionFeature
+{
+    public bool CanHaveBody => canHaveBody;
+}
+
+internal sealed class RecordingDownstreamTransportProxyClient : IDownstreamTransportProxyClient
+{
+    public int CallCount { get; private set; }
+
+    public string? DownstreamApiName { get; private set; }
+
+    public string? PathAndQuery { get; private set; }
+
+    public ClaimsPrincipal? User { get; private set; }
+
+    public Task ProxyWebSocketAsync(
+        HttpContext context,
+        string downstreamApiName,
+        string pathAndQuery,
+        ClaimsPrincipal? user,
+        CancellationToken cancellationToken)
+    {
+        CallCount++;
+        DownstreamApiName = downstreamApiName;
+        PathAndQuery = pathAndQuery;
+        User = user;
+        return Task.CompletedTask;
     }
 }
 
@@ -305,6 +533,9 @@ internal sealed class CaptureRequestHandler(
 {
     private static readonly string DefaultPayload =
         $$"""{"access_token":"captured-token","{{OidcAuthenticationConstants.TokenNames.ExpiresIn}}":120}""";
+    private int requestCount;
+
+    public int RequestCount => Volatile.Read(ref requestCount);
 
     public HttpRequestMessage? LastRequest { get; private set; }
 
@@ -312,6 +543,7 @@ internal sealed class CaptureRequestHandler(
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        Interlocked.Increment(ref requestCount);
         LastRequest = request;
         LastRequestContent = request.Content is null
             ? null
@@ -358,10 +590,255 @@ internal sealed class SignOutRecorder
             scheme,
             properties?.RedirectUri,
             properties?.Items.ToDictionary(static pair => pair.Key, static pair => (string?)pair.Value)
-                ?? new Dictionary<string, string?>()));
+                ?? new Dictionary<string, string?>(),
+            TestOperationSequence.Next()));
     }
 
-    internal sealed record SignOutCall(string Scheme, string? RedirectUri, IReadOnlyDictionary<string, string?> Items);
+    internal sealed record SignOutCall(
+        string Scheme,
+        string? RedirectUri,
+        IReadOnlyDictionary<string, string?> Items,
+        long Sequence);
+}
+
+internal static class TestOperationSequence
+{
+    private static long sequence;
+
+    public static long Next() => Interlocked.Increment(ref sequence);
+}
+
+internal sealed class LoopbackHttpServer : IAsyncDisposable
+{
+    private readonly TcpListener listener;
+    private readonly Func<LoopbackHttpRequest, CancellationToken, Task<LoopbackHttpResponse>> handler;
+    private readonly CancellationTokenSource shutdown = new();
+    private readonly Task acceptLoop;
+
+    private LoopbackHttpServer(
+        TcpListener listener,
+        Func<LoopbackHttpRequest, CancellationToken, Task<LoopbackHttpResponse>> handler)
+    {
+        this.listener = listener;
+        this.handler = handler;
+        listener.Start();
+        var endpoint = (IPEndPoint)listener.LocalEndpoint;
+        BaseAddress = new Uri($"http://127.0.0.1:{endpoint.Port}/", UriKind.Absolute);
+        acceptLoop = Task.Run(() => AcceptLoopAsync(shutdown.Token));
+    }
+
+    public Uri BaseAddress { get; }
+
+    public ConcurrentQueue<LoopbackHttpRequest> Requests { get; } = new();
+
+    public static Task<LoopbackHttpServer> StartAsync(
+        Func<LoopbackHttpRequest, CancellationToken, Task<LoopbackHttpResponse>> handler)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        return Task.FromResult(new LoopbackHttpServer(listener, handler));
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        shutdown.Cancel();
+        listener.Stop();
+
+        try
+        {
+            await acceptLoop;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        shutdown.Dispose();
+    }
+
+    private async Task AcceptLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            TcpClient client;
+            try
+            {
+                client = await listener.AcceptTcpClientAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
+
+            _ = Task.Run(() => HandleClientAsync(client, cancellationToken), cancellationToken);
+        }
+    }
+
+    private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
+    {
+        using var _ = client;
+        using var stream = client.GetStream();
+        using var reader = new StreamReader(stream, Encoding.ASCII, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+
+        var requestLine = await reader.ReadLineAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(requestLine))
+        {
+            return;
+        }
+
+        var parts = requestLine.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string? line;
+        while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync(cancellationToken)))
+        {
+            var separatorIndex = line.IndexOf(':');
+            if (separatorIndex <= 0)
+            {
+                continue;
+            }
+
+            headers[line[..separatorIndex].Trim()] = line[(separatorIndex + 1)..].Trim();
+        }
+
+        var body = IsChunkedTransfer(headers)
+            ? await ReadChunkedBodyAsync(reader, cancellationToken)
+            : await ReadFixedLengthBodyAsync(reader, headers, cancellationToken);
+
+        var request = new LoopbackHttpRequest(parts[0], parts[1], headers, body);
+        Requests.Enqueue(request);
+
+        var response = await handler(request, cancellationToken);
+        using var writer = new StreamWriter(stream, Encoding.ASCII, leaveOpen: true)
+        {
+            NewLine = "\r\n"
+        };
+        var payload = response.Body ?? string.Empty;
+        await writer.WriteLineAsync($"HTTP/1.1 {(int)response.StatusCode} {response.ReasonPhrase ?? response.StatusCode.ToString()}");
+        foreach (var (headerName, headerValue) in response.Headers)
+        {
+            await writer.WriteLineAsync($"{headerName}: {headerValue}");
+        }
+
+        await writer.WriteLineAsync($"Content-Length: {Encoding.ASCII.GetByteCount(payload)}");
+        await writer.WriteLineAsync("Connection: close");
+        await writer.WriteLineAsync();
+        if (payload.Length > 0)
+        {
+            await writer.WriteAsync(payload);
+        }
+
+        await writer.FlushAsync(cancellationToken);
+    }
+
+    private static bool IsChunkedTransfer(IReadOnlyDictionary<string, string> headers)
+        => headers.TryGetValue("Transfer-Encoding", out var transferEncoding)
+            && transferEncoding.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Any(static value => value.Equals("chunked", StringComparison.OrdinalIgnoreCase));
+
+    private static async Task<string> ReadFixedLengthBodyAsync(
+        StreamReader reader,
+        IReadOnlyDictionary<string, string> headers,
+        CancellationToken cancellationToken)
+    {
+        if (!headers.TryGetValue("Content-Length", out var rawContentLength) ||
+            !int.TryParse(rawContentLength, out var contentLength) ||
+            contentLength <= 0)
+        {
+            return string.Empty;
+        }
+
+        var bodyBuffer = new char[contentLength];
+        var totalRead = 0;
+        while (totalRead < contentLength)
+        {
+            var read = await reader.ReadAsync(bodyBuffer.AsMemory(totalRead, contentLength - totalRead), cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+
+            totalRead += read;
+        }
+
+        return new string(bodyBuffer, 0, totalRead);
+    }
+
+    private static async Task<string> ReadChunkedBodyAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        var builder = new StringBuilder();
+
+        while (true)
+        {
+            var sizeLine = await reader.ReadLineAsync(cancellationToken)
+                ?? throw new InvalidOperationException("The chunked request body ended before the chunk size line was read.");
+            var sizeToken = sizeLine.Split(';', 2)[0].Trim();
+            if (!int.TryParse(sizeToken, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var chunkSize))
+            {
+                throw new InvalidOperationException($"The chunked request body contains an invalid chunk size '{sizeLine}'.");
+            }
+
+            if (chunkSize == 0)
+            {
+                await ConsumeTrailerHeadersAsync(reader, cancellationToken);
+                break;
+            }
+
+            var chunkBuffer = new char[chunkSize];
+            var totalRead = 0;
+            while (totalRead < chunkSize)
+            {
+                var read = await reader.ReadAsync(chunkBuffer.AsMemory(totalRead, chunkSize - totalRead), cancellationToken);
+                if (read == 0)
+                {
+                    throw new InvalidOperationException("The chunked request body ended before the current chunk was fully read.");
+                }
+
+                totalRead += read;
+            }
+
+            builder.Append(chunkBuffer, 0, totalRead);
+
+            _ = await reader.ReadLineAsync(cancellationToken)
+                ?? throw new InvalidOperationException("The chunked request body ended before the chunk terminator was read.");
+        }
+
+        return builder.ToString();
+    }
+
+    private static async Task ConsumeTrailerHeadersAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        string? trailerLine;
+        do
+        {
+            trailerLine = await reader.ReadLineAsync(cancellationToken);
+            if (trailerLine is null)
+            {
+                throw new InvalidOperationException("The chunked request body ended before the trailer terminator was read.");
+            }
+        }
+        while (trailerLine.Length > 0);
+    }
+}
+
+internal sealed record LoopbackHttpRequest(
+    string Method,
+    string Path,
+    IReadOnlyDictionary<string, string> Headers,
+    string Body);
+
+internal sealed record LoopbackHttpResponse(
+    HttpStatusCode StatusCode,
+    string? Body = null,
+    string? ReasonPhrase = null,
+    IReadOnlyDictionary<string, string>? ResponseHeaders = null)
+{
+    public IReadOnlyDictionary<string, string> Headers { get; init; } =
+        ResponseHeaders ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 }
 
 internal sealed class RecordingAuthenticationService(
