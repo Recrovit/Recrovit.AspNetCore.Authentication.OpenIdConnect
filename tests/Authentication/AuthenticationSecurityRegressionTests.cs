@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -22,11 +23,54 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Authentication;
 
 public sealed class AuthenticationSecurityRegressionTests
 {
+    public static TheoryData<string?, string> ReturnUrls => new()
+    {
+        { "/", "/" },
+        { "/weather", "/weather" },
+        { "/weather?tab=1#details", "/weather?tab=1#details" },
+        { null, "/" },
+        { "", "/" },
+        { "   ", "/" },
+        { "https://evil.example", "/" },
+        { "//evil.example", "/" },
+        { "/\\evil.example", "/" },
+        { "\\\\evil.example", "/" },
+        { "~/weather", "/" },
+        { "weather", "/" },
+        { "javascript:alert(1)", "/" },
+        { "/weather\r\nLocation: https://evil.example", "/" },
+        { "/weather\t", "/" },
+        { "/weather\0", "/" },
+        { "/weather\u007f", "/" },
+        { "%2F%2Fevil.example", "/" },
+        { "%2F%5Cevil.example", "/" },
+        { "%252F%252Fevil.example", "/" },
+        { "%255C%255Cevil.example", "/" },
+        { "/%2Fevil.example", "/%2Fevil.example" },
+        { "/%5Cevil.example", "/%5Cevil.example" },
+        { "/%2F%2Fevil.example", "/%2F%2Fevil.example" },
+        { "/%5C%5Cevil.example", "/%5C%5Cevil.example" },
+        { "/%252Fevil.example", "/%252Fevil.example" },
+        { "/%255Cevil.example", "/%255Cevil.example" },
+        { "/%252F%252Fevil.example", "/%252F%252Fevil.example" },
+        { "/%255C%255Cevil.example", "/%255C%255Cevil.example" },
+        { "/weather%20forecast", "/weather%20forecast" },
+        { "/weather%3Ftab=1", "/weather%3Ftab=1" }
+    };
+
     [Theory]
-    [InlineData("/weather", "/weather")]
-    [InlineData("https://evil.example", "/")]
-    [InlineData("//evil.example", "/")]
-    [InlineData(null, "/")]
+    [MemberData(nameof(ReturnUrls))]
+    public void SanitizeReturnUrl_ReturnsSafeLocalPath(string? returnUrl, string expectedRedirectUri)
+    {
+        var redirectUri = AuthenticationEndpoints.SanitizeReturnUrl(returnUrl);
+
+        Assert.Equal(expectedRedirectUri, redirectUri);
+        Assert.True(RedirectHttpResult.IsLocalUrl(redirectUri));
+        Assert.StartsWith("/", redirectUri);
+    }
+
+    [Theory]
+    [MemberData(nameof(ReturnUrls))]
     public async Task LoginEndpoint_UsesSanitizedReturnUrl(string? returnUrl, string expectedRedirectUri)
     {
         await using var app = await CreateLoginApplicationAsync();
@@ -39,7 +83,10 @@ public sealed class AuthenticationSecurityRegressionTests
         using var response = await client.GetAsync(requestUri, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-        Assert.Equal(expectedRedirectUri, app.Services.GetRequiredService<ChallengeRecorder>().RedirectUri);
+        var redirectUri = app.Services.GetRequiredService<ChallengeRecorder>().RedirectUri;
+        Assert.Equal(expectedRedirectUri, redirectUri);
+        Assert.True(RedirectHttpResult.IsLocalUrl(redirectUri));
+        Assert.StartsWith("/", redirectUri);
     }
 
     [Fact]
@@ -116,14 +163,15 @@ public sealed class AuthenticationSecurityRegressionTests
         Assert.Empty(app.Services.GetRequiredService<SignOutRecorder>().Calls);
     }
 
-    [Fact]
-    public async Task LogoutEndpoint_RemovesTokensAndSignsOutUsingSanitizedReturnUrl()
+    [Theory]
+    [MemberData(nameof(ReturnUrls))]
+    public async Task LogoutEndpoint_RemovesTokensAndSignsOutUsingSanitizedReturnUrl(string? returnUrl, string expectedRedirectUri)
     {
         await using var app = await CreateAuthenticatedLogoutApplicationAsync();
         using var client = app.GetTestClient();
 
         var tokens = await GetAntiforgeryTokensAsync(client);
-        using var request = CreateLogoutRequest("https://evil.example", tokens);
+        using var request = CreateLogoutRequest(returnUrl, tokens);
         using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -131,7 +179,12 @@ public sealed class AuthenticationSecurityRegressionTests
 
         var signOutCalls = app.Services.GetRequiredService<SignOutRecorder>().Calls;
         Assert.Equal(2, signOutCalls.Count);
-        Assert.All(signOutCalls, call => Assert.Equal("/", call.RedirectUri));
+        Assert.All(signOutCalls, call =>
+        {
+            Assert.Equal(expectedRedirectUri, call.RedirectUri);
+            Assert.True(RedirectHttpResult.IsLocalUrl(call.RedirectUri));
+            Assert.StartsWith("/", call.RedirectUri);
+        });
         Assert.Equal(
             [CookieAuthenticationDefaults.AuthenticationScheme, OpenIdConnectDefaults.AuthenticationScheme],
             signOutCalls.Select(static call => call.Scheme).ToArray());
@@ -393,9 +446,12 @@ public sealed class AuthenticationSecurityRegressionTests
         return tokens! with { CookieHeader = cookieHeader.Split(';', 2)[0] };
     }
 
-    private static HttpRequestMessage CreateLogoutRequest(string returnUrl, AntiforgeryTokenResponse tokens)
+    private static HttpRequestMessage CreateLogoutRequest(string? returnUrl, AntiforgeryTokenResponse tokens)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, $"/authentication/logout?returnUrl={Uri.EscapeDataString(returnUrl)}");
+        var requestUri = returnUrl is null
+            ? "/authentication/logout"
+            : $"/authentication/logout?returnUrl={Uri.EscapeDataString(returnUrl)}";
+        var request = new HttpRequestMessage(HttpMethod.Post, requestUri);
         request.Headers.Add("Cookie", tokens.CookieHeader);
 
         var formFieldName = string.IsNullOrWhiteSpace(tokens.FormFieldName)

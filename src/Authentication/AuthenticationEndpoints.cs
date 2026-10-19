@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -107,9 +108,15 @@ public static class AuthenticationEndpoints
 
         if (Uri.TryCreate(returnUrl, UriKind.Relative, out var relativeUri) &&
             returnUrl.StartsWith("/", StringComparison.Ordinal) &&
-            !returnUrl.StartsWith("//", StringComparison.Ordinal))
+            RedirectHttpResult.IsLocalUrl(returnUrl))
         {
-            return relativeUri.ToString();
+            var redirectUrl = relativeUri.ToString();
+            // Validate the normalized value that will actually be passed to the redirect.
+            if (redirectUrl.StartsWith("/", StringComparison.Ordinal) &&
+                RedirectHttpResult.IsLocalUrl(redirectUrl))
+            {
+                return redirectUrl;
+            }
         }
 
         return "/";

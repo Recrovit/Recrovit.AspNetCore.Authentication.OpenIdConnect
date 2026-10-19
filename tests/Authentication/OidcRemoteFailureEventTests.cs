@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Recrovit.AspNetCore.Authentication.OpenIdConnect.Configuration;
@@ -11,12 +12,20 @@ namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Tests.Authentication;
 
 public sealed class OidcRemoteFailureEventTests
 {
-    [Fact]
-    public async Task RemoteFailure_RedirectsHandledFailures()
+    [Theory]
+    [InlineData("/safe-landing", "/safe-landing")]
+    [InlineData("/weather?tab=1#details", "/weather?tab=1#details")]
+    [InlineData("/\\evil.example", "/")]
+    [InlineData("/weather\t", "/")]
+    [InlineData("/%2Fevil.example", "/%2Fevil.example")]
+    [InlineData("/%5Cevil.example", "/%5Cevil.example")]
+    [InlineData("/%252Fevil.example", "/%252Fevil.example")]
+    [InlineData("/%255Cevil.example", "/%255Cevil.example")]
+    public async Task RemoteFailure_RedirectsHandledFailures(string redirectPath, string expectedRedirectPath)
     {
         using var serviceProvider = CreateServiceProvider(new Dictionary<string, string?>
         {
-            [$"{TestConfiguration.RootSectionName}:Host:RemoteFailureRedirectPath"] = "/safe-landing"
+            [$"{TestConfiguration.RootSectionName}:Host:RemoteFailureRedirectPath"] = redirectPath
         });
         var options = serviceProvider.GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>()
             .Get(OpenIdConnectDefaults.AuthenticationScheme);
@@ -24,7 +33,10 @@ public sealed class OidcRemoteFailureEventTests
 
         await options.Events!.RemoteFailure(context);
 
-        Assert.Equal("/safe-landing", context.Response.Headers.Location.ToString());
+        var redirectUri = context.Response.Headers.Location.ToString();
+        Assert.Equal(expectedRedirectPath, redirectUri);
+        Assert.True(RedirectHttpResult.IsLocalUrl(redirectUri));
+        Assert.StartsWith("/", redirectUri);
         Assert.True(context.Result?.Handled ?? false);
     }
 

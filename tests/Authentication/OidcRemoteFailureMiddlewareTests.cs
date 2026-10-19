@@ -2,6 +2,7 @@ using System.Net;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -76,7 +77,23 @@ public sealed class OidcRemoteFailureMiddlewareTests
         Assert.Equal("/safe-landing", response.Headers.Location?.OriginalString);
     }
 
-    private static async Task<WebApplication> CreateApplicationAsync()
+    [Theory]
+    [MemberData(nameof(AuthenticationSecurityRegressionTests.ReturnUrls), MemberType = typeof(AuthenticationSecurityRegressionTests))]
+    public async Task Middleware_SanitizesConfiguredRedirectPath(string? redirectPath, string expectedRedirectPath)
+    {
+        await using var app = await CreateApplicationAsync(redirectPath);
+        using var client = app.GetTestClient();
+
+        using var response = await client.GetAsync("/signin-oidc?error=access_denied", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Found, response.StatusCode);
+        var redirectUri = response.Headers.Location?.OriginalString;
+        Assert.Equal(expectedRedirectPath, redirectUri);
+        Assert.True(RedirectHttpResult.IsLocalUrl(redirectUri));
+        Assert.StartsWith("/", redirectUri);
+    }
+
+    private static async Task<WebApplication> CreateApplicationAsync(string? redirectPath = "/safe-landing")
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -92,7 +109,7 @@ public sealed class OidcRemoteFailureMiddlewareTests
         builder.Services.AddAntiforgery();
         builder.Services.AddSingleton<IOptions<OidcAuthenticationOptions>>(Options.Create(new OidcAuthenticationOptions
         {
-            RemoteFailureRedirectPath = "/safe-landing"
+            RemoteFailureRedirectPath = redirectPath!
         }));
         builder.Services.AddSingleton<IOptions<ActiveOidcProviderOptions>>(Options.Create(new ActiveOidcProviderOptions
         {
