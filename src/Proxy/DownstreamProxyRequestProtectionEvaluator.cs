@@ -7,12 +7,22 @@ using Recrovit.AspNetCore.Authentication.OpenIdConnect.Diagnostics;
 
 namespace Recrovit.AspNetCore.Authentication.OpenIdConnect.Proxy;
 
-internal interface IDownstreamProxyRequestProtectionEvaluator
+/// <summary>Evaluates browser request signals for endpoints marked with <see cref="ProxyEndpointMetadata"/>.</summary>
+/// <remarks>Endpoints without proxy metadata are allowed. This service does not validate antiforgery tokens.
+/// The generic downstream proxy separately validates tokens when the evaluation requires them.</remarks>
+public interface IDownstreamProxyRequestProtectionEvaluator
 {
+    /// <summary>Evaluates the current HTTP request or WebSocket handshake against the configured host policy.</summary>
     DownstreamProxyRequestProtectionEvaluation Evaluate(HttpContext context);
 }
 
-internal readonly record struct DownstreamProxyRequestProtectionEvaluation(
+/// <summary>The browser-origin decision and the separate antiforgery requirement for a proxy request.</summary>
+/// <param name="IsAllowed">Whether the request passes the browser request policy.</param>
+/// <param name="RequiresAntiforgeryValidation">Whether the generic proxy must additionally validate an antiforgery token.</param>
+/// <param name="FailureStatusCode">The HTTP status to return for a rejected request.</param>
+/// <param name="RequestType">The evaluated transport type.</param>
+/// <param name="Reason">The diagnostic reason for the decision.</param>
+public readonly record struct DownstreamProxyRequestProtectionEvaluation(
     bool IsAllowed,
     bool RequiresAntiforgeryValidation,
     int FailureStatusCode,

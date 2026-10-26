@@ -2,7 +2,13 @@
 
 This file contains the release history for `Recrovit.AspNetCore.Authentication.OpenIdConnect`.
 
-## [10.2.0] - Unreleased
+## [10.3.0] - Unreleased
+
+### Other Changes
+
+- Custom proxy integrations can reuse the registered browser-request protection evaluator and its decision result without duplicating Origin/Fetch Metadata rules; generic proxy antiforgery requirements are unchanged.
+
+## [10.2.0] - 2026-08-14
 
 ### Features Added
 

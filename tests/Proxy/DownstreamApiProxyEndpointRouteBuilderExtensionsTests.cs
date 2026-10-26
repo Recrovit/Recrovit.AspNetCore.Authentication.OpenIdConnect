@@ -836,6 +836,21 @@ public sealed class DownstreamApiProxyEndpointRouteBuilderExtensionsTests
         Assert.Equal(0, proxyClient.CallCount);
     }
 
+    [Fact]
+    public async Task MapDownstreamApiProxyEndpoints_HttpOriginWhitelistDoesNotWaiveAntiforgery()
+    {
+        var proxyClient = new RecordingDownstreamHttpProxyClient(new HttpResponseMessage(HttpStatusCode.OK));
+        await using var app = await CreateApplicationAsync(proxyClient,
+            protectionOptions: new DownstreamProxyRequestProtectionOptions { AllowedHttpOrigins = ["https://trusted.example.com"] },
+            antiforgery: new StubAntiforgery(isRequestValid: false));
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/downstream/GraphApi/me");
+        request.Headers.TryAddWithoutValidation("Origin", "https://trusted.example.com");
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, proxyClient.CallCount);
+    }
+
     [Theory]
     [InlineData("POST")]
     [InlineData("PUT")]

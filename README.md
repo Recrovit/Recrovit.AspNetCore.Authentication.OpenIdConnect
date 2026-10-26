@@ -338,6 +338,10 @@ Example:
 
 This protection is a browser-request defense for the generic proxy surface. It does not replace endpoint authorization, and the unsafe-method path assumes the host already exposes an antiforgery token issuance mechanism for its frontend.
 
+Custom proxy integrations can resolve the public `IDownstreamProxyRequestProtectionEvaluator` from the existing infrastructure registration. Call `Evaluate(HttpContext)` before token acquisition or downstream dispatch, and reject requests when `IsAllowed` is false. Every protected endpoint must carry `.AsProxyEndpoint()` metadata: the evaluator deliberately allows endpoints without that metadata. The concrete evaluator remains internal and all integrations share the same Origin/Fetch Metadata algorithm and host configuration.
+
+Evaluation does not perform antiforgery validation. The generic downstream proxy additionally validates a token when `RequiresAntiforgeryValidation` is true, including requests accepted through the HTTP Origin whitelist. The RGF-specific proxy uses the origin decision without requiring an antiforgery token; this does not relax the generic proxy's policy. `AllowSameSite` defaults to false, and an HTTP whitelist entry cannot override `Sec-Fetch-Site: cross-site`. HTTP and WebSocket whitelists remain separate.
+
 ### `Recrovit:OpenIdConnect:TokenCache`
 
 Bound to `TokenCacheOptions`.
