@@ -294,53 +294,9 @@ Upgrade note for 10.2.0: downstream proxy path validation is stricter than earli
 
 ### Downstream Proxy Request Protection
 
-Starting with 10.2.0, the host options include `Recrovit:OpenIdConnect:Host:DownstreamProxyRequestProtection` for the generic downstream proxy surface.
+The generic downstream proxy protects browser HTTP requests and WebSocket handshakes against initiation from untrusted origins. Configure the policy under `Recrovit:OpenIdConnect:Host:DownstreamProxyRequestProtection`. Unsafe HTTP requests also require a valid antiforgery token.
 
-Default behavior:
-
-- HTTP requests allow only `Sec-Fetch-Site: same-origin` by default
-- HTTP `POST`, `PUT`, `PATCH`, `DELETE`, and any other unsafe proxy methods also require a valid antiforgery token
-- WebSocket proxy handshakes require a single non-`null` `Origin` header that matches the host origin
-- `Sec-Fetch-Site` is the primary signal
-- `same-site` is rejected unless `AllowSameSite` is explicitly enabled
-- `Sec-Fetch-Site: none` is rejected in strict mode
-- when Fetch Metadata headers are unavailable, the host can fall back to a same-origin or explicitly allowed `Origin` header, or to a configured custom request header
-
-Recommended frontend behavior for compatibility paths:
-
-- for browser-based same-origin calls, let the browser send `Sec-Fetch-Site` naturally
-- for cookie-authenticated unsafe calls, send the antiforgery token expected by the host
-- for older clients that do not send Fetch Metadata, send a same-origin `Origin` header when possible
-- if neither header is available, configure a custom header such as `X-Recrovit-Proxy-Intent` and send the expected value from the trusted frontend
-- for non-browser WebSocket clients, enable `AllowMissingWebSocketOrigin` only when that compatibility path is actually required
-
-Example:
-
-```json
-{
-  "Recrovit": {
-    "OpenIdConnect": {
-      "Host": {
-        "DownstreamProxyRequestProtection": {
-          "Mode": "FetchMetadataFirst",
-          "AllowSameSite": false,
-          "AllowedHttpOrigins": [ "https://app.example.com" ],
-          "AllowedWebSocketOrigins": [ "https://app.example.com" ],
-          "AllowMissingWebSocketOrigin": false,
-          "CustomHeaderName": "X-Recrovit-Proxy-Intent",
-          "CustomHeaderValue": "same-site"
-        }
-      }
-    }
-  }
-}
-```
-
-This protection is a browser-request defense for the generic proxy surface. It does not replace endpoint authorization, and the unsafe-method path assumes the host already exposes an antiforgery token issuance mechanism for its frontend.
-
-Custom proxy integrations can resolve the public `IDownstreamProxyRequestProtectionEvaluator` from the existing infrastructure registration. Call `Evaluate(HttpContext)` before token acquisition or downstream dispatch, and reject requests when `IsAllowed` is false. Every protected endpoint must carry `.AsProxyEndpoint()` metadata: the evaluator deliberately allows endpoints without that metadata. The concrete evaluator remains internal and all integrations share the same Origin/Fetch Metadata algorithm and host configuration.
-
-Evaluation does not perform antiforgery validation. The generic downstream proxy additionally validates a token when `RequiresAntiforgeryValidation` is true, including requests accepted through the HTTP Origin whitelist. The RGF-specific proxy uses the origin decision without requiring an antiforgery token; this does not relax the generic proxy's policy. `AllowSameSite` defaults to false, and an HTTP whitelist entry cannot override `Sec-Fetch-Site: cross-site`. HTTP and WebSocket whitelists remain separate.
+See [Downstream Proxy Request Protection](docs/proxy-request-protection.md) for configuration, Origin/Fetch Metadata rules, compatibility requirements and custom proxy integration.
 
 ### `Recrovit:OpenIdConnect:TokenCache`
 
